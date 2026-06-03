@@ -1,0 +1,366 @@
+use anyhow::{bail, Context, Result};
+use headless_chrome::{Browser, LaunchOptions};
+use reqwest::Client;
+use std::path::Path;
+use tokio::fs;
+
+use crate::utils::{ensure_dir, make_filename};
+
+/// 图片信息
+#[derive(Debug, Clone)]
+pub struct ImageInfo {
+    pub url: String,
+    pub is_video: bool,
+}
+
+/// 下载进度回调
+pub type ProgressCallback = Box<dyn Fn(&str) + Send + Sync>;
+
+/// 浏览器 User-Agent
+const BROWSER_UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36";
+
+/// 创建下载客户端
+fn build_download_client() -> Result<Client> {
+    let client = Client::builder()
+        .user_agent(BROWSER_UA)
+        .default_headers({
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert("Referer", "https://www.instagram.com/".parse().unwrap());
+            headers.insert(
+                "Accept",
+                "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+                    .parse()
+                    .unwrap(),
+            );
+            headers
+        })
+        .build()?;
+    Ok(client)
+}
+
+/// 用无头浏览器获取帖子图片 URL（原始画质）
+pub async fn fetch_image_urls(
+    url: &str,
+    cookie: &str,
+    _csrf_token: &str,
+    log: &ProgressCallback,
+) -> Result<Vec<ImageInfo>> {
+    log(&format!("正在解析链接: {}", url));
+
+    let shortcode = crate::utils::extract_shortcode(url)
+        .context("无法从链接中提取 shortcode，请确认链接格式正确")?;
+
+    log(&format!("Shortcode: {}", shortcode));
+
+    let default_cookie =
+        "ds_user_id=6009511404; csrftoken=en2hyrbjkI3AjRBUKDUPcaLyNsGYhocx; wd=1671x626";
+    let actual_cookie = if cookie.is_empty() {
+        default_cookie
+    } else {
+        cookie
+    };
+    let post_url = format!("https://www.instagram.com/p/{}/", shortcode);
+
+    log("启动浏览器...");
+
+    let post_url_clone = post_url.clone();
+    let cookie_clone = actual_cookie.to_string();
+    let images =
+        tokio::task::spawn_blocking(move || fetch_with_browser(&post_url_clone, &cookie_clone))
+            .await
+            .context("浏览器任务失败")??;
+
+    log(&format!("找到 {} 张图片", images.len()));
+    for (i, img) in images.iter().enumerate() {
+        log(&format!(
+            "  图片 {}: {}...",
+            i + 1,
+            &img.url[..img.url.chars().count().min(80)]
+        ));
+    }
+
+    if images.is_empty() {
+        bail!("该帖子没有图片（可能是纯视频帖）");
+    }
+
+    Ok(images)
+}
+
+/// 在无头浏览器中获取图片 URL
+fn fetch_with_browser(post_url: &str, cookie: &str) -> Result<Vec<ImageInfo>> {
+    let browser = Browser::new(
+        LaunchOptions::default_builder()
+            .headless(true)
+            .build()
+            .unwrap(),
+    )?;
+
+    let tab = browser.new_tab()?;
+
+    // 先访问 Instagram 域名以设置 cookie
+    tab.navigate_to("https://www.instagram.com/")?;
+    tab.wait_until_navigated()?;
+
+    // 设置 cookie
+    for part in cookie.split(';') {
+        let part = part.trim();
+        if let Some(eq_pos) = part.find('=') {
+            let name = &part[..eq_pos];
+            let value = &part[eq_pos + 1..];
+            let _ = tab.set_cookies(vec![headless_chrome::protocol::cdp::Network::CookieParam {
+                name: name.to_string(),
+                value: value.to_string(),
+                url: None,
+                domain: Some(".instagram.com".to_string()),
+                path: Some("/".to_string()),
+                secure: Some(true),
+                http_only: None,
+                same_site: None,
+                expires: None,
+                priority: None,
+                same_party: None,
+                source_scheme: None,
+                partition_key: None,
+                source_port: None,
+            }]);
+        }
+    }
+
+    // 导航到帖子页面
+    tab.navigate_to(post_url)?;
+    tab.wait_until_navigated()?;
+    std::thread::sleep(std::time::Duration::from_secs(3));
+
+    // 获取轮播图总数
+    let total = get_carousel_count(&tab).unwrap_or(1);
+    eprintln!("[INFO] 轮播图总数: {}", total);
+
+    // 边滑边提取：Instagram 虚拟化只保留当前图附近的 2-3 个 li。
+    // 每一步都收集当前 DOM 中所有可见图片，避免最后一张因中心判断偏移而漏掉。
+    let mut all_urls: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    collect_visible_images(&tab, &mut seen, &mut all_urls);
+    eprintln!("[INFO] 初始提取 {} 张", all_urls.len());
+
+    for i in 1..total {
+        if all_urls.len() >= total {
+            break;
+        }
+
+        let before = all_urls.len();
+        click_next_button(&tab);
+
+        for retry in 0..=4 {
+            let wait = if i == total - 1 || retry > 0 {
+                900
+            } else {
+                1400
+            };
+            std::thread::sleep(std::time::Duration::from_millis(wait));
+            collect_visible_images(&tab, &mut seen, &mut all_urls);
+
+            if all_urls.len() > before || all_urls.len() >= total {
+                break;
+            }
+
+            if retry < 4 {
+                eprintln!("[INFO] 滑动第 {} 次后未发现新图，重试 {}/4", i, retry + 1);
+            }
+        }
+
+        eprintln!("[INFO] 已提取 {}/{} 张", all_urls.len(), total);
+    }
+
+    let mut images = Vec::new();
+    for url in all_urls {
+        images.push(ImageInfo {
+            url,
+            is_video: false,
+        });
+    }
+
+    Ok(images)
+}
+
+/// 获取轮播图总数（通过圆点指示器 _acnb 判断）
+fn get_carousel_count(tab: &headless_chrome::Tab) -> Option<usize> {
+    let js = r#"
+        (function() {
+            var dots = document.querySelectorAll('._acnb');
+            if (dots.length > 0) return dots.length;
+            return 1;
+        })()
+    "#;
+    let result = tab.evaluate(js, false).ok()?;
+    match result.value {
+        Some(val) => val.as_u64().map(|n| n as usize),
+        None => None,
+    }
+}
+
+/// 点击"下一步"按钮
+fn click_next_button(tab: &headless_chrome::Tab) {
+    let js = r#"
+        (function() {
+            var btn = document.querySelector('button._afxw') ||
+                      document.querySelector('button[aria-label="下一步"]');
+            if (btn) { btn.click(); return true; }
+            return false;
+        })()
+    "#;
+    let _ = tab.evaluate(js, false);
+}
+
+fn collect_visible_images(
+    tab: &headless_chrome::Tab,
+    seen: &mut std::collections::HashSet<String>,
+    all_urls: &mut Vec<String>,
+) {
+    let urls = extract_visible_images(tab);
+    if urls.is_empty() {
+        log_image_diagnostics(tab);
+    }
+
+    for url in urls {
+        if seen.insert(url.clone()) {
+            eprintln!("[INFO] 捕获图片 URL: {}...", &url[..url.len().min(90)]);
+            all_urls.push(url);
+        }
+    }
+}
+
+fn log_image_diagnostics(tab: &headless_chrome::Tab) {
+    let js = r#"
+        (function() {
+            var imgs = Array.prototype.slice.call(document.querySelectorAll('ul li ._aagu img'));
+            var lines = [];
+            lines.push('carouselImgCount=' + imgs.length);
+            imgs.slice(0, 5).forEach(function(img, index) {
+                lines.push(
+                    'img[' + index + '] src=' + (img.src || '') +
+                    ' currentSrc=' + (img.currentSrc || '') +
+                    ' size=' + (img.naturalWidth || 0) + 'x' + (img.naturalHeight || 0)
+                );
+            });
+            return lines.join('\n');
+        })()
+    "#;
+
+    match tab.evaluate(js, false) {
+        Ok(result) => eprintln!("[DEBUG] 轮播图片诊断: {:?}", result.value),
+        Err(e) => eprintln!("[DEBUG] 轮播图片诊断失败: {}", e),
+    }
+}
+
+/// 提取当前 DOM 中轮播区域里的图片 URL。
+fn extract_visible_images(tab: &headless_chrome::Tab) -> Vec<String> {
+    let js = r#"
+        (function() {
+            var imgs = document.querySelectorAll('ul li ._aagu img');
+            var urls = [];
+            var seen = {};
+            for (var i = 0; i < imgs.length; i++) {
+                var img = imgs[i];
+                var src = img.currentSrc || img.src || '';
+                if (!src || src.indexOf('scontent') === -1) continue;
+                src = src.replace(/&amp;/g, '&').replace(/\\u0026/g, '&');
+                if (seen[src]) continue;
+                seen[src] = true;
+                urls.push(src);
+            }
+            return urls.join('\n');
+        })()
+    "#;
+    let result = match tab.evaluate(js, false) {
+        Ok(result) => result,
+        Err(e) => {
+            eprintln!("[WARN] 轮播图片提取脚本执行失败: {}", e);
+            return Vec::new();
+        }
+    };
+    match result.value {
+        Some(val) => val
+            .as_str()
+            .map(|items| {
+                items
+                    .lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(ToString::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        None => Vec::new(),
+    }
+}
+
+/// 下载所有图片到指定目录
+pub async fn download_images(
+    images: &[ImageInfo],
+    save_dir: &Path,
+    log: &ProgressCallback,
+) -> Result<Vec<String>> {
+    ensure_dir(save_dir)?;
+
+    let client = build_download_client()?;
+    let mut downloaded = Vec::new();
+
+    for (i, img) in images.iter().enumerate() {
+        let filename = make_filename(&img.url);
+        let filepath = save_dir.join(&filename);
+
+        log(&format!(
+            "正在下载 {}/{}: {}",
+            i + 1,
+            images.len(),
+            filename
+        ));
+
+        match download_single(&client, &img.url, &filepath).await {
+            Ok(size) => {
+                log(&format!(
+                    "[OK] 已保存: {} ({:.1} KB)",
+                    filename,
+                    size as f64 / 1024.0
+                ));
+                downloaded.push(filename);
+            }
+            Err(e) => {
+                log(&format!("[ERR] 下载失败 {}: {}", filename, e));
+            }
+        }
+    }
+
+    Ok(downloaded)
+}
+
+/// 下载单个图片
+async fn download_single(client: &Client, url: &str, path: &Path) -> Result<u64> {
+    let resp = client.get(url).send().await?;
+
+    if !resp.status().is_success() {
+        bail!("HTTP {}", resp.status());
+    }
+
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    if !content_type.starts_with("image/") {
+        bail!("响应不是图片 (Content-Type: {})", content_type);
+    }
+
+    let bytes = resp.bytes().await?;
+    let size = bytes.len() as u64;
+
+    if size < 1000 {
+        bail!("文件太小 ({} bytes)", size);
+    }
+
+    fs::write(path, &bytes).await?;
+    Ok(size)
+}
