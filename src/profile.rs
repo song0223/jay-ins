@@ -13,39 +13,72 @@ const DEFAULT_COOKIE: &str =
 
 /// 尝试从 Chrome 读取最新的 Instagram Cookie
 pub fn try_load_chrome_cookie() -> Option<String> {
-    // macOS: 从 Chrome Cookie 数据库读取
-    #[cfg(target_os = "macos")]
-    {
-        let cookie_path = dirs_next::home_dir()
-            .map(|h| h.join("Library/Application Support/Google/Chrome/Default/Cookies"))?;
-
-        if !cookie_path.exists() {
-            return None;
+    // 方式1: 从环境变量读取
+    if let Ok(cookie) = std::env::var("INSTAGRAM_COOKIE") {
+        if !cookie.is_empty() && cookie.contains("sessionid=") {
+            eprintln!("[INFO] 从环境变量 INSTAGRAM_COOKIE 读取到 Cookie");
+            return Some(cookie);
         }
+    }
 
-        // 使用 browser_cookie3 读取 Chrome Cookie
-        let output = std::process::Command::new("python3")
-            .args(["-c", r#"
+    // 方式2: 从配置文件读取
+    if let Some(cookie) = load_cookie_from_config() {
+        if cookie.contains("sessionid=") {
+            eprintln!("[INFO] 从配置文件读取到 Cookie");
+            return Some(cookie);
+        }
+    }
+
+    // 方式3: 尝试从 Chrome 读取（需要 browser_cookie3）
+    if let Some(cookie) = try_read_chrome_cookie() {
+        return Some(cookie);
+    }
+
+    None
+}
+
+/// 从配置文件读取 Cookie
+fn load_cookie_from_config() -> Option<String> {
+    let config_path = dirs_next::config_dir()
+        .or_else(|| dirs_next::home_dir().map(|h| h.join(".config")))?
+        .join("jayins")
+        .join("cookie.txt");
+
+    if config_path.exists() {
+        std::fs::read_to_string(&config_path).ok()
+    } else {
+        None
+    }
+}
+
+/// 尝试从 Chrome 浏览器读取 Cookie
+fn try_read_chrome_cookie() -> Option<String> {
+    let script = r#"
 import browser_cookie3
-cj = browser_cookie3.chrome(domain_name='.instagram.com')
-cookies = {}
-for c in cj:
-    cookies[c.name] = c.value
-parts = []
-for k in ['ds_user_id', 'csrftoken', 'wd', 'sessionid']:
-    if k in cookies and cookies[k]:
-        parts.append(f'{k}={cookies[k]}')
-if 'sessionid' in cookies:
-    print('; '.join(parts))
-"#])
-            .output()
-            .ok()?;
+try:
+    cj = browser_cookie3.chrome(domain_name='.instagram.com')
+    cookies = {}
+    for c in cj:
+        cookies[c.name] = c.value
+    parts = []
+    for k in ['ds_user_id', 'csrftoken', 'wd', 'sessionid']:
+        if k in cookies and cookies[k]:
+            parts.append(f'{k}={cookies[k]}')
+    if 'sessionid' in cookies:
+        print('; '.join(parts))
+except Exception as e:
+    pass
+"#;
 
-        let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if result.contains("sessionid=") {
-            eprintln!("[INFO] 从 Chrome 读取到最新 Cookie");
-            return Some(result);
-        }
+    let output = std::process::Command::new("python3")
+        .args(["-c", script])
+        .output()
+        .ok()?;
+
+    let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if result.contains("sessionid=") {
+        eprintln!("[INFO] 从 Chrome 读取到最新 Cookie");
+        return Some(result);
     }
     None
 }

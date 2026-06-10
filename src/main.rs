@@ -64,6 +64,17 @@ fn print_help() {
     println!("  jayins https://www.instagram.com/p/ABC123/");
     println!("  jayins https://www.instagram.com/p/ABC123/ ~/Pictures");
     println!("  jayins profile https://www.instagram.com/jaychou/");
+    println!();
+    println!("Cookie 设置（按优先级）:");
+    println!("  1. 环境变量: export INSTAGRAM_COOKIE='sessionid=xxx; ...'");
+    println!("  2. 配置文件: ~/.config/jayins/cookie.txt");
+    println!("  3. 自动读取: 从 Chrome 浏览器自动获取（需要 browser_cookie3）");
+    println!("  4. 内置默认: 使用程序内置的 Cookie");
+    println!();
+    println!("Linux 用户获取 Cookie:");
+    println!("  1. 浏览器登录 Instagram");
+    println!("  2. F12 → Console → 输入 document.cookie");
+    println!("  3. 复制输出到 ~/.config/jayins/cookie.txt");
 }
 
 fn run_download_cli(url: &str, save_dir: &str) -> eframe::Result {

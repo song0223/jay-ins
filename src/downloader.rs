@@ -55,9 +55,10 @@ pub async fn fetch_image_urls(
     let default_cookie =
         "ds_user_id=6009511404; csrftoken=en2hyrbjkI3AjRBUKDUPcaLyNsGYhocx; wd=1671x626; sessionid=6009511404%3ADt7ylCb1z380Fq%3A6%3AAYi90RxHDVdEZ36B89y1V91Gt64gvDDZ02i1Q7NZBjg";
     let actual_cookie = if cookie.is_empty() {
-        default_cookie
+        // 尝试自动读取 Cookie
+        crate::profile::try_load_chrome_cookie().unwrap_or_else(|| default_cookie.to_string())
     } else {
-        cookie
+        cookie.to_string()
     };
     let post_url = format!("https://www.instagram.com/p/{}/", shortcode);
 
