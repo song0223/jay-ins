@@ -8,27 +8,31 @@ use app::JayinsApp;
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().collect();
 
-    // 命令行模式：jayins <url> [save_dir]
+    // 命令行模式
     if args.len() >= 2 {
-        if args[1] == "--help" || args[1] == "-h" {
-            println!("Jayins - Instagram 图片下载器");
-            println!();
-            println!("用法:");
-            println!("  jayins                          启动图形界面");
-            println!("  jayins <链接> [保存目录]          命令行下载");
-            println!();
-            println!("示例:");
-            println!("  jayins https://www.instagram.com/p/ABC123/");
-            println!("  jayins https://www.instagram.com/p/ABC123/ ~/Pictures");
-            return Ok(());
+        match args[1].as_str() {
+            "--help" | "-h" => {
+                print_help();
+                return Ok(());
+            }
+            "profile" => {
+                if args.len() < 3 {
+                    eprintln!("❌ 请提供主页链接");
+                    eprintln!("用法: jayins profile <主页链接>");
+                    std::process::exit(1);
+                }
+                return run_profile_cli(&args[2]);
+            }
+            _ => {
+                let url = &args[1];
+                let save_dir = if args.len() >= 3 {
+                    args[2].clone()
+                } else {
+                    default_save_dir()
+                };
+                return run_download_cli(url, &save_dir);
+            }
         }
-        let url = &args[1];
-        let save_dir = if args.len() >= 3 {
-            args[2].clone()
-        } else {
-            default_save_dir()
-        };
-        return run_cli(url, &save_dir);
     }
 
     // GUI 模式
@@ -48,14 +52,25 @@ fn main() -> eframe::Result {
     )
 }
 
-fn run_cli(url: &str, save_dir: &str) -> eframe::Result {
-    let log = |msg: &str| println!("{}", msg);
+fn print_help() {
+    println!("Jayins - Instagram 图片下载器");
+    println!();
+    println!("用法:");
+    println!("  jayins                              启动图形界面");
+    println!("  jayins <帖子链接> [保存目录]          下载帖子图片");
+    println!("  jayins profile <主页链接>             获取主页帖子列表");
+    println!();
+    println!("示例:");
+    println!("  jayins https://www.instagram.com/p/ABC123/");
+    println!("  jayins https://www.instagram.com/p/ABC123/ ~/Pictures");
+    println!("  jayins profile https://www.instagram.com/jaychou/");
+}
 
-    log(&format!("链接: {}", url));
-    log(&format!("保存到: {}", save_dir));
+fn run_download_cli(url: &str, save_dir: &str) -> eframe::Result {
+    println!("链接: {}", url);
+    println!("保存到: {}", save_dir);
 
     let rt = tokio::runtime::Runtime::new().expect("无法创建异步运行时");
-
     let log: downloader::ProgressCallback = Box::new(|msg: &str| println!("{}", msg));
 
     match rt.block_on(async {
@@ -79,7 +94,34 @@ fn run_cli(url: &str, save_dir: &str) -> eframe::Result {
         Ok::<_, anyhow::Error>(downloaded)
     }) {
         Ok(downloaded) => {
-            log(&format!("✅ 完成，共 {} 张图片", downloaded.len()));
+            println!("✅ 完成，共 {} 张图片", downloaded.len());
+        }
+        Err(e) => {
+            eprintln!("❌ {}", e);
+            std::process::exit(1);
+        }
+    }
+
+    Ok(())
+}
+
+fn run_profile_cli(profile_url: &str) -> eframe::Result {
+    println!("主页: {}", profile_url);
+    println!("正在获取帖子列表...");
+
+    let rt = tokio::runtime::Runtime::new().expect("无法创建异步运行时");
+
+    match rt.block_on(profile::fetch_profile_posts(profile_url)) {
+        Ok(posts) => {
+            if posts.is_empty() {
+                println!("未找到帖子");
+            } else {
+                println!("✅ 找到 {} 个帖子:\n", posts.len());
+                for (i, post) in posts.iter().enumerate() {
+                    println!("{}. {}", i + 1, post.url);
+                }
+                println!("\n复制链接即可在浏览器打开或用 jayins <链接> 下载");
+            }
         }
         Err(e) => {
             eprintln!("❌ {}", e);
