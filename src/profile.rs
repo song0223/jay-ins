@@ -126,11 +126,26 @@ fn fetch_with_browser(profile_url: &str, download_covers: bool) -> Result<Vec<Pr
     eprintln!("[INFO] 访问主页: {}", profile_url);
     match tab.navigate_to(profile_url) {
         Ok(_) => {}
-        Err(e) => {
+        Err(_) => {
             eprintln!("[WARN] 导航超时，继续尝试...");
         }
     }
-    std::thread::sleep(std::time::Duration::from_secs(5));
+    std::thread::sleep(std::time::Duration::from_secs(3));
+
+    // 等待帖子元素出现（最多 10 秒）
+    for i in 0..10 {
+        let count = count_post_anchors(&tab);
+        if count > 0 {
+            eprintln!("[INFO] 帖子已加载: {} 个", count);
+            break;
+        }
+        eprintln!("[INFO] 等待帖子加载... ({}/10)", i + 1);
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+
+    // 滚动页面触发懒加载
+    let _ = tab.evaluate("window.scrollTo(0, document.body.scrollHeight)", false);
+    std::thread::sleep(std::time::Duration::from_secs(2));
 
     // 诊断页面状态
     diagnose_page(&tab);
@@ -147,6 +162,24 @@ fn fetch_with_browser(profile_url: &str, download_covers: bool) -> Result<Vec<Pr
     }
 
     Ok(posts)
+}
+
+fn count_post_anchors(tab: &headless_chrome::Tab) -> usize {
+    let js = r#"
+        (function() {
+            var anchors = document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"], a[href*="/tv/"]');
+            var postRe = /^\/[A-Za-z0-9._]+\/(p|reel|tv)\/[A-Za-z0-9_-]+\/?$/;
+            var count = 0;
+            for (var i = 0; i < anchors.length; i++) {
+                if (postRe.test(anchors[i].getAttribute('href') || '')) count++;
+            }
+            return count;
+        })()
+    "#;
+    match tab.evaluate(js, false) {
+        Ok(result) => result.value.and_then(|v| v.as_u64()).unwrap_or(0) as usize,
+        Err(_) => 0,
+    }
 }
 
 fn diagnose_page(tab: &headless_chrome::Tab) {
