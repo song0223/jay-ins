@@ -216,19 +216,22 @@ fn extract_caption(tab: &headless_chrome::Tab) -> String {
     }
 }
 
-/// 获取轮播图总数（通过圆点指示器 _acnb 判断）
+/// 获取轮播图总数（通过圆点指示器 _acnb 判断，单图返回 1）
 fn get_carousel_count(tab: &headless_chrome::Tab) -> Option<usize> {
     let js = r#"
         (function() {
             var dots = document.querySelectorAll('._acnb');
-            if (dots.length > 0) return dots.length;
+            if (dots.length > 1) return dots.length;
+            // 检查是否有轮播按钮
+            var hasCarousel = document.querySelector('button._afxw') || document.querySelector('button[aria-label="下一步"]');
+            if (hasCarousel) return dots.length || 2;
             return 1;
         })()
     "#;
     let result = tab.evaluate(js, false).ok()?;
     match result.value {
         Some(val) => val.as_u64().map(|n| n as usize),
-        None => None,
+        None => Some(1),
     }
 }
 
@@ -267,13 +270,17 @@ fn collect_visible_images(
 fn log_image_diagnostics(tab: &headless_chrome::Tab) {
     let js = r#"
         (function() {
-            var imgs = Array.prototype.slice.call(document.querySelectorAll('ul li ._aagu img'));
+            var imgs1 = document.querySelectorAll('ul li ._aagu img');
+            var imgs2 = document.querySelectorAll('article ._aagu img');
+            var imgs3 = document.querySelectorAll('._aagu img');
             var lines = [];
-            lines.push('carouselImgCount=' + imgs.length);
-            imgs.slice(0, 5).forEach(function(img, index) {
+            lines.push('carouselImgCount=' + imgs1.length);
+            lines.push('articleImgCount=' + imgs2.length);
+            lines.push('allAaguImgCount=' + imgs3.length);
+            var imgs = imgs1.length > 0 ? imgs1 : (imgs2.length > 0 ? imgs2 : imgs3);
+            Array.prototype.slice.call(imgs).slice(0, 5).forEach(function(img, index) {
                 lines.push(
-                    'img[' + index + '] src=' + (img.src || '') +
-                    ' currentSrc=' + (img.currentSrc || '') +
+                    'img[' + index + '] src=' + (img.src || '').substring(0, 100) +
                     ' size=' + (img.naturalWidth || 0) + 'x' + (img.naturalHeight || 0)
                 );
             });
@@ -287,11 +294,20 @@ fn log_image_diagnostics(tab: &headless_chrome::Tab) {
     }
 }
 
-/// 提取当前 DOM 中轮播区域里的图片 URL。
+/// 提取当前 DOM 中帖子图片 URL（支持轮播和单图）
 fn extract_visible_images(tab: &headless_chrome::Tab) -> Vec<String> {
     let js = r#"
         (function() {
+            // 优先从 ul li（轮播）提取
             var imgs = document.querySelectorAll('ul li ._aagu img');
+            // 如果没有，从 article 内提取（单图帖）
+            if (imgs.length === 0) {
+                imgs = document.querySelectorAll('article ._aagu img');
+            }
+            // 还没有，从整个页面的 ._aagu 提取
+            if (imgs.length === 0) {
+                imgs = document.querySelectorAll('._aagu img');
+            }
             var urls = [];
             var seen = {};
             for (var i = 0; i < imgs.length; i++) {
@@ -309,7 +325,7 @@ fn extract_visible_images(tab: &headless_chrome::Tab) -> Vec<String> {
     let result = match tab.evaluate(js, false) {
         Ok(result) => result,
         Err(e) => {
-            eprintln!("[WARN] 轮播图片提取脚本执行失败: {}", e);
+            eprintln!("[WARN] 图片提取脚本执行失败: {}", e);
             return Vec::new();
         }
     };
