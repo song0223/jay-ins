@@ -1,0 +1,23 @@
+#!/bin/bash
+# Jayins - Instagram 图片下载器
+# 自动检测平台并运行对应版本
+
+DIR="$(cd "$(dirname "$0")" && pwd)"
+OS="$(uname -s)"
+ARCH="$(uname -m)"
+
+if [ "$OS" = "Darwin" ]; then
+    if [ "$ARCH" = "arm64" ]; then
+        exec "$DIR/jayins-macos-arm64" "$@"
+    else
+        echo "不支持的架构: $ARCH，请从源码编译"
+        exit 1
+    fi
+elif [ "$OS" = "Linux" ]; then
+    echo "Linux 版本暂未提供，请从源码编译: cargo build --release"
+    exit 1
+else
+    echo "不支持的操作系统: $OS"
+    echo "Windows 用户请运行: jayins.exe"
+    exit 1
+fi
