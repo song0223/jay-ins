@@ -9,7 +9,7 @@ pub struct ProfilePost {
 }
 
 const DEFAULT_COOKIE: &str =
-    "ds_user_id=6009511404; csrftoken=en2hyrbjkI3AjRBUKDUPcaLyNsGYhocx; wd=1671x626";
+    "ds_user_id=6009511404; csrftoken=en2hyrbjkI3AjRBUKDUPcaLyNsGYhocx; wd=1671x626; sessionid=6009511404%3ADt7ylCb1z380Fq%3A6%3AAYi90RxHDVdEZ36B89y1V91Gt64gvDDZ02i1Q7NZBjg";
 
 pub async fn fetch_profile_posts(profile_url: &str) -> Result<Vec<ProfilePost>> {
     let profile_url = crate::utils::normalize_profile_url(profile_url)
@@ -34,15 +34,34 @@ fn fetch_with_browser(profile_url: &str) -> Result<Vec<ProfilePost>> {
     )?;
     let tab = browser.new_tab()?;
 
+    // 设置 User-Agent 让 Chrome 看起来像正常浏览器
+    let _ = tab.evaluate(
+        r#"Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"#,
+        false,
+    );
+
+    eprintln!("[INFO] 设置 Cookie...");
+    // 先访问 Instagram 域名以建立会话
     tab.navigate_to("https://www.instagram.com/")?;
     tab.wait_until_navigated()?;
+    std::thread::sleep(std::time::Duration::from_secs(2));
     set_cookie(&tab);
+    // 刷新页面让 Cookie 生效
+    tab.reload(false, None)?;
+    tab.wait_until_navigated()?;
+    std::thread::sleep(std::time::Duration::from_secs(2));
 
+    eprintln!("[INFO] 访问主页: {}", profile_url);
     tab.navigate_to(profile_url)?;
     tab.wait_until_navigated()?;
-    std::thread::sleep(std::time::Duration::from_secs(3));
+    std::thread::sleep(std::time::Duration::from_secs(5));
+
+    // 诊断页面状态
+    diagnose_page(&tab);
 
     let mut posts = extract_posts(&tab);
+
+    eprintln!("[INFO] 找到 {} 个帖子", posts.len());
 
     // 通过 Chrome 下载封面图（绕过 CDN 限制）
     for post in &mut posts {
@@ -52,16 +71,41 @@ fn fetch_with_browser(profile_url: &str) -> Result<Vec<ProfilePost>> {
     Ok(posts)
 }
 
+fn diagnose_page(tab: &headless_chrome::Tab) {
+    let js = r#"
+        (function() {
+            var url = window.location.href;
+            var title = document.title;
+            var anchors = document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]');
+            var postRe = /^\/[A-Za-z0-9._]+\/(p|reel|tv)\/[A-Za-z0-9_-]+\/?$/;
+            var postCount = 0;
+            for (var i = 0; i < anchors.length; i++) {
+                if (postRe.test(anchors[i].getAttribute('href') || '')) postCount++;
+            }
+            return 'url=' + url + '\ntitle=' + title + '\npostAnchors=' + postCount;
+        })()
+    "#;
+    match tab.evaluate(js, false) {
+        Ok(result) => {
+            if let Some(info) = result.value.and_then(|v| v.as_str().map(String::from)) {
+                eprintln!("[DEBUG] 页面诊断:\n{}", info);
+            }
+        }
+        Err(e) => eprintln!("[DEBUG] 诊断失败: {}", e),
+    }
+}
+
 fn set_cookie(tab: &headless_chrome::Tab) {
     for part in DEFAULT_COOKIE.split(';') {
         let part = part.trim();
         if let Some(eq_pos) = part.find('=') {
             let name = &part[..eq_pos];
             let value = &part[eq_pos + 1..];
-            let _ = tab.set_cookies(vec![headless_chrome::protocol::cdp::Network::CookieParam {
+            eprintln!("[INFO] 设置 Cookie: {}={}", name, value);
+            match tab.set_cookies(vec![headless_chrome::protocol::cdp::Network::CookieParam {
                 name: name.to_string(),
                 value: value.to_string(),
-                url: None,
+                url: Some("https://www.instagram.com/".to_string()),
                 domain: Some(".instagram.com".to_string()),
                 path: Some("/".to_string()),
                 secure: Some(true),
@@ -73,7 +117,10 @@ fn set_cookie(tab: &headless_chrome::Tab) {
                 source_scheme: None,
                 partition_key: None,
                 source_port: None,
-            }]);
+            }]) {
+                Ok(_) => eprintln!("[OK] Cookie 设置成功: {}", name),
+                Err(e) => eprintln!("[WARN] Cookie 设置失败: {} - {}", name, e),
+            }
         }
     }
 }

@@ -53,7 +53,7 @@ pub async fn fetch_image_urls(
     log(&format!("Shortcode: {}", shortcode));
 
     let default_cookie =
-        "ds_user_id=6009511404; csrftoken=en2hyrbjkI3AjRBUKDUPcaLyNsGYhocx; wd=1671x626";
+        "ds_user_id=6009511404; csrftoken=en2hyrbjkI3AjRBUKDUPcaLyNsGYhocx; wd=1671x626; sessionid=6009511404%3ADt7ylCb1z380Fq%3A6%3AAYi90RxHDVdEZ36B89y1V91Gt64gvDDZ02i1Q7NZBjg";
     let actual_cookie = if cookie.is_empty() {
         default_cookie
     } else {
