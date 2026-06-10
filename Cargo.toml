@@ -7,7 +7,7 @@ description = "Instagram 帖子图片下载器"
 [dependencies]
 eframe = "0.29"
 egui = "0.29"
-reqwest = { version = "0.12", features = ["json", "cookies"] }
+reqwest = { version = "0.12", features = ["json", "cookies", "blocking"] }
 headless_chrome = "1"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 tokio = { version = "1", features = ["full"] }

@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use headless_chrome::{Browser, LaunchOptions};
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -99,6 +99,22 @@ pub async fn fetch_profile_posts_with_covers(profile_url: &str, download_covers:
 }
 
 fn fetch_with_browser(profile_url: &str, download_covers: bool) -> Result<Vec<ProfilePost>> {
+    // 尝试从 Chrome 读取最新 Cookie，否则用默认值
+    let chrome_cookie = try_load_chrome_cookie();
+    let cookie_to_use = chrome_cookie.as_deref().unwrap_or(DEFAULT_COOKIE);
+
+    // 方式1: 尝试 API 方式（更可靠）
+    eprintln!("[INFO] 尝试 API 方式获取...");
+    match fetch_via_api(profile_url, cookie_to_use) {
+        Ok(posts) if !posts.is_empty() => {
+            eprintln!("[INFO] API 方式成功，找到 {} 个帖子", posts.len());
+            return Ok(posts);
+        }
+        Ok(_) => eprintln!("[INFO] API 方式未返回帖子，尝试浏览器方式..."),
+        Err(e) => eprintln!("[INFO] API 方式失败: {}，尝试浏览器方式...", e),
+    }
+
+    // 方式2: 浏览器方式
     let browser = Browser::new(
         LaunchOptions::default_builder()
             .headless(true)
@@ -111,28 +127,19 @@ fn fetch_with_browser(profile_url: &str, download_covers: bool) -> Result<Vec<Pr
             })?,
     )?;
     let tab = browser.new_tab()?;
-
-    // 设置更长的导航超时
     let _ = tab.set_default_timeout(std::time::Duration::from_secs(30));
-
-    // 尝试从 Chrome 读取最新 Cookie，否则用默认值
-    let chrome_cookie = try_load_chrome_cookie();
-    let cookie_to_use = chrome_cookie.as_deref().unwrap_or(DEFAULT_COOKIE);
 
     eprintln!("[INFO] 设置 Cookie...");
     set_cookie_with(&tab, cookie_to_use);
 
-    // 直接访问目标页面
     eprintln!("[INFO] 访问主页: {}", profile_url);
     match tab.navigate_to(profile_url) {
         Ok(_) => {}
-        Err(_) => {
-            eprintln!("[WARN] 导航超时，继续尝试...");
-        }
+        Err(_) => eprintln!("[WARN] 导航超时，继续尝试..."),
     }
-    std::thread::sleep(std::time::Duration::from_secs(3));
+    std::thread::sleep(std::time::Duration::from_secs(5));
 
-    // 等待帖子元素出现（最多 10 秒）
+    // 等待帖子元素出现
     for i in 0..10 {
         let count = count_post_anchors(&tab);
         if count > 0 {
@@ -143,22 +150,85 @@ fn fetch_with_browser(profile_url: &str, download_covers: bool) -> Result<Vec<Pr
         std::thread::sleep(std::time::Duration::from_secs(1));
     }
 
-    // 滚动页面触发懒加载
     let _ = tab.evaluate("window.scrollTo(0, document.body.scrollHeight)", false);
     std::thread::sleep(std::time::Duration::from_secs(2));
 
-    // 诊断页面状态
     diagnose_page(&tab);
 
     let mut posts = extract_posts(&tab);
-
     eprintln!("[INFO] 找到 {} 个帖子", posts.len());
 
-    // 通过 Chrome 下载封面图（绕过 CDN 限制）
     if download_covers {
         for post in &mut posts {
             post.cover_bytes = download_image_via_chrome(&tab, &post.cover_url);
         }
+    }
+
+    Ok(posts)
+}
+
+/// 通过 Instagram GraphQL API 获取主页帖子（更可靠）
+fn fetch_via_api(profile_url: &str, cookie: &str) -> Result<Vec<ProfilePost>> {
+    let username = crate::utils::normalize_profile_url(profile_url)
+        .and_then(|u| {
+            u.trim_end_matches('/').rsplit('/').next().map(|s| s.to_string())
+        })
+        .context("无法从链接提取用户名")?;
+
+    eprintln!("[INFO] 用户名: {}", username);
+
+    let client = reqwest::blocking::Client::builder()
+        .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
+        .build()?;
+
+    // 获取用户 ID（通过 web_profile_info）
+    let resp = client
+        .get(&format!("https://www.instagram.com/api/v1/users/web_profile_info/?username={}", username))
+        .header("X-IG-App-ID", "936619743392459")
+        .header("X-Requested-With", "XMLHttpRequest")
+        .header("Cookie", cookie)
+        .send()?;
+
+    if !resp.status().is_success() {
+        bail!("用户信息请求失败: {}", resp.status());
+    }
+
+    let data: serde_json::Value = resp.json()?;
+
+    // 从 GraphQL 数据中提取帖子
+    let user_data = data.pointer("/data/user")
+        .context("无法获取用户数据")?;
+
+    let edges = user_data
+        .pointer("/edge_owner_to_timeline_media/edges")
+        .and_then(|v| v.as_array())
+        .context("无法获取帖子列表")?;
+
+    let mut posts = Vec::new();
+    for edge in edges {
+        let node = edge.get("node").unwrap_or(edge);
+        let shortcode = node.get("shortcode")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let is_video = node.get("is_video")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let display_url = node.get("display_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+        let url = if is_video {
+            format!("https://www.instagram.com/reel/{}/", shortcode)
+        } else {
+            format!("https://www.instagram.com/p/{}/", shortcode)
+        };
+
+        posts.push(ProfilePost {
+            url,
+            cover_url: display_url.to_string(),
+            timestamp: String::new(),
+            cover_bytes: Vec::new(),
+        });
     }
 
     Ok(posts)
@@ -187,13 +257,18 @@ fn diagnose_page(tab: &headless_chrome::Tab) {
         (function() {
             var url = window.location.href;
             var title = document.title;
+            var body = document.body ? document.body.innerText.substring(0, 500) : 'no body';
             var anchors = document.querySelectorAll('a[href*="/p/"], a[href*="/reel/"]');
             var postRe = /^\/[A-Za-z0-9._]+\/(p|reel|tv)\/[A-Za-z0-9_-]+\/?$/;
             var postCount = 0;
             for (var i = 0; i < anchors.length; i++) {
                 if (postRe.test(anchors[i].getAttribute('href') || '')) postCount++;
             }
-            return 'url=' + url + '\ntitle=' + title + '\npostAnchors=' + postCount;
+            var allLinks = document.querySelectorAll('a').length;
+            var imgs = document.querySelectorAll('img').length;
+            return 'url=' + url + '\ntitle=' + title + '\npostAnchors=' + postCount +
+                   '\nallLinks=' + allLinks + '\nimgCount=' + imgs +
+                   '\nbodyPreview=' + body.replace(/\n/g, ' ').substring(0, 200);
         })()
     "#;
     match tab.evaluate(js, false) {
