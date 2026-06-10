@@ -11,6 +11,45 @@ pub struct ProfilePost {
 const DEFAULT_COOKIE: &str =
     "ds_user_id=6009511404; csrftoken=en2hyrbjkI3AjRBUKDUPcaLyNsGYhocx; wd=1671x626; sessionid=6009511404%3ADt7ylCb1z380Fq%3A6%3AAYi90RxHDVdEZ36B89y1V91Gt64gvDDZ02i1Q7NZBjg";
 
+/// 尝试从 Chrome 读取最新的 Instagram Cookie
+pub fn try_load_chrome_cookie() -> Option<String> {
+    // macOS: 从 Chrome Cookie 数据库读取
+    #[cfg(target_os = "macos")]
+    {
+        let cookie_path = dirs_next::home_dir()
+            .map(|h| h.join("Library/Application Support/Google/Chrome/Default/Cookies"))?;
+
+        if !cookie_path.exists() {
+            return None;
+        }
+
+        // 使用 browser_cookie3 读取 Chrome Cookie
+        let output = std::process::Command::new("python3")
+            .args(["-c", r#"
+import browser_cookie3
+cj = browser_cookie3.chrome(domain_name='.instagram.com')
+cookies = {}
+for c in cj:
+    cookies[c.name] = c.value
+parts = []
+for k in ['ds_user_id', 'csrftoken', 'wd', 'sessionid']:
+    if k in cookies and cookies[k]:
+        parts.append(f'{k}={cookies[k]}')
+if 'sessionid' in cookies:
+    print('; '.join(parts))
+"#])
+            .output()
+            .ok()?;
+
+        let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if result.contains("sessionid=") {
+            eprintln!("[INFO] 从 Chrome 读取到最新 Cookie");
+            return Some(result);
+        }
+    }
+    None
+}
+
 pub async fn fetch_profile_posts(profile_url: &str) -> Result<Vec<ProfilePost>> {
     let profile_url = crate::utils::normalize_profile_url(profile_url)
         .context("请输入正确的 Instagram 主页链接")?;
@@ -40,12 +79,16 @@ fn fetch_with_browser(profile_url: &str) -> Result<Vec<ProfilePost>> {
         false,
     );
 
+    // 尝试从 Chrome 读取最新 Cookie，否则用默认值
+    let chrome_cookie = try_load_chrome_cookie();
+    let cookie_to_use = chrome_cookie.as_deref().unwrap_or(DEFAULT_COOKIE);
+
     eprintln!("[INFO] 设置 Cookie...");
     // 先访问 Instagram 域名以建立会话
     tab.navigate_to("https://www.instagram.com/")?;
     tab.wait_until_navigated()?;
     std::thread::sleep(std::time::Duration::from_secs(2));
-    set_cookie(&tab);
+    set_cookie_with(&tab, cookie_to_use);
     // 刷新页面让 Cookie 生效
     tab.reload(false, None)?;
     tab.wait_until_navigated()?;
@@ -96,7 +139,11 @@ fn diagnose_page(tab: &headless_chrome::Tab) {
 }
 
 fn set_cookie(tab: &headless_chrome::Tab) {
-    for part in DEFAULT_COOKIE.split(';') {
+    set_cookie_with(tab, DEFAULT_COOKIE);
+}
+
+fn set_cookie_with(tab: &headless_chrome::Tab, cookie_str: &str) {
+    for part in cookie_str.split(';') {
         let part = part.trim();
         if let Some(eq_pos) = part.find('=') {
             let name = &part[..eq_pos];
