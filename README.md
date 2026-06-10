@@ -124,16 +124,6 @@ src/
 └── build.yml              # GitHub Actions 自动编译
 ```
 
-## 🔨 自动构建
-
-项目使用 GitHub Actions 自动编译所有平台版本。推送 tag 时自动触发：
-
-```bash
-git tag v0.2.0
-git push origin v0.2.0
-# 自动编译并发布到 Releases
-```
-
 ## ⚠️ 注意事项
 
 - 需要能访问 Instagram 的网络环境
