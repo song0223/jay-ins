@@ -92,7 +92,12 @@ fn fetch_with_browser(post_url: &str, cookie: &str) -> Result<(Vec<ImageInfo>, S
         LaunchOptions::default_builder()
             .headless(true)
             .build()
-            .unwrap(),
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "无法启动浏览器: {}\n\n请安装 Chrome 或 Chromium:\n  macOS: brew install --cask google-chrome\n  Ubuntu/Debian: sudo apt install chromium-browser\n  Fedora: sudo dnf install chromium\n  Arch: sudo pacman -S chromium",
+                    e
+                )
+            })?,
     )?;
 
     let tab = browser.new_tab()?;
