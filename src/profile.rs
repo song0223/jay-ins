@@ -112,30 +112,24 @@ fn fetch_with_browser(profile_url: &str, download_covers: bool) -> Result<Vec<Pr
     )?;
     let tab = browser.new_tab()?;
 
-    // 设置 User-Agent 让 Chrome 看起来像正常浏览器
-    let _ = tab.evaluate(
-        r#"Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"#,
-        false,
-    );
+    // 设置更长的导航超时
+    let _ = tab.set_default_timeout(std::time::Duration::from_secs(30));
 
     // 尝试从 Chrome 读取最新 Cookie，否则用默认值
     let chrome_cookie = try_load_chrome_cookie();
     let cookie_to_use = chrome_cookie.as_deref().unwrap_or(DEFAULT_COOKIE);
 
     eprintln!("[INFO] 设置 Cookie...");
-    // 先访问 Instagram 域名以建立会话
-    tab.navigate_to("https://www.instagram.com/")?;
-    tab.wait_until_navigated()?;
-    std::thread::sleep(std::time::Duration::from_secs(2));
     set_cookie_with(&tab, cookie_to_use);
-    // 刷新页面让 Cookie 生效
-    tab.reload(false, None)?;
-    tab.wait_until_navigated()?;
-    std::thread::sleep(std::time::Duration::from_secs(2));
 
+    // 直接访问目标页面
     eprintln!("[INFO] 访问主页: {}", profile_url);
-    tab.navigate_to(profile_url)?;
-    tab.wait_until_navigated()?;
+    match tab.navigate_to(profile_url) {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("[WARN] 导航超时，继续尝试...");
+        }
+    }
     std::thread::sleep(std::time::Duration::from_secs(5));
 
     // 诊断页面状态
