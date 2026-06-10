@@ -1,10 +1,12 @@
 use anyhow::{Context, Result};
 use headless_chrome::{Browser, LaunchOptions};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ProfilePost {
     pub url: String,
     pub cover_url: String,
+    pub timestamp: String,
+    #[serde(skip)]
     pub cover_bytes: Vec<u8>,
 }
 
@@ -84,15 +86,19 @@ except Exception as e:
 }
 
 pub async fn fetch_profile_posts(profile_url: &str) -> Result<Vec<ProfilePost>> {
+    fetch_profile_posts_with_covers(profile_url, false).await
+}
+
+pub async fn fetch_profile_posts_with_covers(profile_url: &str, download_covers: bool) -> Result<Vec<ProfilePost>> {
     let profile_url = crate::utils::normalize_profile_url(profile_url)
         .context("请输入正确的 Instagram 主页链接")?;
 
-    tokio::task::spawn_blocking(move || fetch_with_browser(&profile_url))
+    tokio::task::spawn_blocking(move || fetch_with_browser(&profile_url, download_covers))
         .await
         .context("浏览器任务失败")?
 }
 
-fn fetch_with_browser(profile_url: &str) -> Result<Vec<ProfilePost>> {
+fn fetch_with_browser(profile_url: &str, download_covers: bool) -> Result<Vec<ProfilePost>> {
     let browser = Browser::new(
         LaunchOptions::default_builder()
             .headless(true)
@@ -140,8 +146,10 @@ fn fetch_with_browser(profile_url: &str) -> Result<Vec<ProfilePost>> {
     eprintln!("[INFO] 找到 {} 个帖子", posts.len());
 
     // 通过 Chrome 下载封面图（绕过 CDN 限制）
-    for post in &mut posts {
-        post.cover_bytes = download_image_via_chrome(&tab, &post.cover_url);
+    if download_covers {
+        for post in &mut posts {
+            post.cover_bytes = download_image_via_chrome(&tab, &post.cover_url);
+        }
     }
 
     Ok(posts)
@@ -300,9 +308,11 @@ fn extract_posts(tab: &headless_chrome::Tab) -> Vec<ProfilePost> {
         .filter_map(|line| {
             let (href, cover_url) = line.split_once('\t')?;
             let url = crate::utils::absolute_instagram_url(href)?;
+            let shortcode = href.split('/').filter(|s| !s.is_empty()).last().unwrap_or("").to_string();
             Some(ProfilePost {
                 url,
                 cover_url: cover_url.to_string(),
+                timestamp: String::new(),
                 cover_bytes: Vec::new(),
             })
         })

@@ -164,7 +164,7 @@ impl JayinsApp {
                 logs.push(format!("正在获取主页: {}", profile_url));
             }
 
-            match crate::profile::fetch_profile_posts(&profile_url).await {
+            match crate::profile::fetch_profile_posts_with_covers(&profile_url, true).await {
                 Ok(found) => {
                     let count = found.len();
                     if let Ok(mut posts) = posts.lock() {

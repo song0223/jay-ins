@@ -155,8 +155,8 @@ fn run_download_cli(url: &str, save_dir: &str, cookie: Option<&str>) -> eframe::
 }
 
 fn run_profile_cli(profile_url: &str, cookie: Option<&str>) -> eframe::Result {
-    println!("主页: {}", profile_url);
-    println!("正在获取帖子列表...");
+    eprintln!("主页: {}", profile_url);
+    eprintln!("正在获取帖子列表...");
 
     // 设置 Cookie 环境变量（如果通过命令行传入）
     if let Some(c) = cookie {
@@ -168,13 +168,19 @@ fn run_profile_cli(profile_url: &str, cookie: Option<&str>) -> eframe::Result {
     match rt.block_on(profile::fetch_profile_posts(profile_url)) {
         Ok(posts) => {
             if posts.is_empty() {
-                println!("未找到帖子");
+                eprintln!("未找到帖子");
             } else {
-                println!("✅ 找到 {} 个帖子:\n", posts.len());
-                for (i, post) in posts.iter().enumerate() {
-                    println!("{}. {}", i + 1, post.url);
-                }
-                println!("\n复制链接即可在浏览器打开或用 jayins <链接> 下载");
+                // 输出 JSON 到 stdout
+                let output: Vec<serde_json::Value> = posts.iter().map(|p| {
+                    let shortcode = p.url.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+                    serde_json::json!({
+                        "url": p.url,
+                        "id": shortcode,
+                    })
+                }).collect();
+
+                println!("{}", serde_json::to_string_pretty(&output).unwrap());
+                eprintln!("\n✅ 共 {} 个帖子", posts.len());
             }
         }
         Err(e) => {
