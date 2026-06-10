@@ -1,14 +1,41 @@
 mod app;
 mod downloader;
+mod profile;
 mod utils;
 
 use app::JayinsApp;
 
 fn main() -> eframe::Result {
+    let args: Vec<String> = std::env::args().collect();
+
+    // 命令行模式：jayins <url> [save_dir]
+    if args.len() >= 2 {
+        if args[1] == "--help" || args[1] == "-h" {
+            println!("Jayins - Instagram 图片下载器");
+            println!();
+            println!("用法:");
+            println!("  jayins                          启动图形界面");
+            println!("  jayins <链接> [保存目录]          命令行下载");
+            println!();
+            println!("示例:");
+            println!("  jayins https://www.instagram.com/p/ABC123/");
+            println!("  jayins https://www.instagram.com/p/ABC123/ ~/Pictures");
+            return Ok(());
+        }
+        let url = &args[1];
+        let save_dir = if args.len() >= 3 {
+            args[2].clone()
+        } else {
+            default_save_dir()
+        };
+        return run_cli(url, &save_dir);
+    }
+
+    // GUI 模式
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([500.0, 500.0])
-            .with_min_inner_size([420.0, 460.0])
+            .with_inner_size([468.0, 765.0])
+            .with_min_inner_size([420.0, 560.0])
             .with_titlebar_shown(true)
             .with_icon(app_icon()),
         ..Default::default()
@@ -19,6 +46,55 @@ fn main() -> eframe::Result {
         options,
         Box::new(|cc| Ok(Box::new(JayinsApp::new(cc)))),
     )
+}
+
+fn run_cli(url: &str, save_dir: &str) -> eframe::Result {
+    let log = |msg: &str| println!("{}", msg);
+
+    log(&format!("链接: {}", url));
+    log(&format!("保存到: {}", save_dir));
+
+    let rt = tokio::runtime::Runtime::new().expect("无法创建异步运行时");
+
+    let log: downloader::ProgressCallback = Box::new(|msg: &str| println!("{}", msg));
+
+    match rt.block_on(async {
+        let (images, caption) =
+            downloader::fetch_image_urls(url, "", "", &log).await?;
+
+        if !caption.is_empty() {
+            println!("--- 文案 ---");
+            println!("{}", caption);
+            println!("------------");
+        }
+
+        if images.is_empty() {
+            anyhow::bail!("未找到图片");
+        }
+
+        let save_path = std::path::PathBuf::from(save_dir);
+        let downloaded =
+            downloader::download_images(&images, &save_path, &log).await?;
+
+        Ok::<_, anyhow::Error>(downloaded)
+    }) {
+        Ok(downloaded) => {
+            log(&format!("✅ 完成，共 {} 张图片", downloaded.len()));
+        }
+        Err(e) => {
+            eprintln!("❌ {}", e);
+            std::process::exit(1);
+        }
+    }
+
+    Ok(())
+}
+
+fn default_save_dir() -> String {
+    dirs_next::download_dir()
+        .or_else(|| dirs_next::home_dir().map(|h| h.join("Downloads")))
+        .map(|p| p.join("jayins").to_string_lossy().to_string())
+        .unwrap_or_else(|| "jayins_downloads".to_string())
 }
 
 fn app_icon() -> egui::IconData {

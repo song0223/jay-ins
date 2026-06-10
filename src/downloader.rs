@@ -38,13 +38,13 @@ fn build_download_client() -> Result<Client> {
     Ok(client)
 }
 
-/// 用无头浏览器获取帖子图片 URL（原始画质）
+/// 用无头浏览器获取帖子图片 URL（原始画质）和文案
 pub async fn fetch_image_urls(
     url: &str,
     cookie: &str,
     _csrf_token: &str,
     log: &ProgressCallback,
-) -> Result<Vec<ImageInfo>> {
+) -> Result<(Vec<ImageInfo>, String)> {
     log(&format!("正在解析链接: {}", url));
 
     let shortcode = crate::utils::extract_shortcode(url)
@@ -65,7 +65,7 @@ pub async fn fetch_image_urls(
 
     let post_url_clone = post_url.clone();
     let cookie_clone = actual_cookie.to_string();
-    let images =
+    let (images, caption) =
         tokio::task::spawn_blocking(move || fetch_with_browser(&post_url_clone, &cookie_clone))
             .await
             .context("浏览器任务失败")??;
@@ -83,11 +83,11 @@ pub async fn fetch_image_urls(
         bail!("该帖子没有图片（可能是纯视频帖）");
     }
 
-    Ok(images)
+    Ok((images, caption))
 }
 
-/// 在无头浏览器中获取图片 URL
-fn fetch_with_browser(post_url: &str, cookie: &str) -> Result<Vec<ImageInfo>> {
+/// 在无头浏览器中获取图片 URL 和文案
+fn fetch_with_browser(post_url: &str, cookie: &str) -> Result<(Vec<ImageInfo>, String)> {
     let browser = Browser::new(
         LaunchOptions::default_builder()
             .headless(true)
@@ -131,12 +131,18 @@ fn fetch_with_browser(post_url: &str, cookie: &str) -> Result<Vec<ImageInfo>> {
     tab.wait_until_navigated()?;
     std::thread::sleep(std::time::Duration::from_secs(3));
 
+    // 提取文案
+    let caption = extract_caption(&tab);
+    if !caption.is_empty() {
+        let preview: String = caption.chars().take(50).collect();
+        eprintln!("[INFO] 帖子文案: {}...", preview);
+    }
+
     // 获取轮播图总数
     let total = get_carousel_count(&tab).unwrap_or(1);
     eprintln!("[INFO] 轮播图总数: {}", total);
 
-    // 边滑边提取：Instagram 虚拟化只保留当前图附近的 2-3 个 li。
-    // 每一步都收集当前 DOM 中所有可见图片，避免最后一张因中心判断偏移而漏掉。
+    // 边滑边提取
     let mut all_urls: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
@@ -152,35 +158,57 @@ fn fetch_with_browser(post_url: &str, cookie: &str) -> Result<Vec<ImageInfo>> {
         click_next_button(&tab);
 
         for retry in 0..=4 {
-            let wait = if i == total - 1 || retry > 0 {
-                900
-            } else {
-                1400
-            };
+            let wait = if i == total - 1 || retry > 0 { 900 } else { 1400 };
             std::thread::sleep(std::time::Duration::from_millis(wait));
             collect_visible_images(&tab, &mut seen, &mut all_urls);
 
             if all_urls.len() > before || all_urls.len() >= total {
                 break;
             }
-
             if retry < 4 {
                 eprintln!("[INFO] 滑动第 {} 次后未发现新图，重试 {}/4", i, retry + 1);
             }
         }
-
         eprintln!("[INFO] 已提取 {}/{} 张", all_urls.len(), total);
     }
 
     let mut images = Vec::new();
     for url in all_urls {
-        images.push(ImageInfo {
-            url,
-            is_video: false,
-        });
+        images.push(ImageInfo { url, is_video: false });
     }
 
-    Ok(images)
+    Ok((images, caption))
+}
+
+/// 提取帖子文案
+fn extract_caption(tab: &headless_chrome::Tab) -> String {
+    let js = r#"
+        (function() {
+            // 文案 span 有独特类名 x126k92a
+            var el = document.querySelector('span.x126k92a');
+            if (el) return (el.innerText || '').trim();
+            // 兜底: 找不嵌套在 a 标签内、不含 time 的长文本 span
+            var spans = document.querySelectorAll('span');
+            for (var i = 0; i < spans.length; i++) {
+                var s = spans[i];
+                if (s.children.length > 0) continue;
+                if (s.closest('a')) continue;
+                if (s.closest('time')) continue;
+                var t = (s.innerText || '').trim();
+                if (t.length >= 2 && !/^\d+\s*(天|小时|分钟|秒|周|月|年|day|hour|min)/i.test(t)) {
+                    return t;
+                }
+            }
+            return '';
+        })()
+    "#;
+    match tab.evaluate(js, false) {
+        Ok(result) => result
+            .value
+            .and_then(|v| v.as_str().map(|s| s.to_string()))
+            .unwrap_or_default(),
+        Err(_) => String::new(),
+    }
 }
 
 /// 获取轮播图总数（通过圆点指示器 _acnb 判断）
@@ -224,7 +252,8 @@ fn collect_visible_images(
 
     for url in urls {
         if seen.insert(url.clone()) {
-            eprintln!("[INFO] 捕获图片 URL: {}...", &url[..url.len().min(90)]);
+            let preview: String = url.chars().take(90).collect();
+            eprintln!("[INFO] 捕获图片 URL: {}...", preview);
             all_urls.push(url);
         }
     }

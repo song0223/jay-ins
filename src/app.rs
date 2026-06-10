@@ -3,6 +3,12 @@ use std::sync::{Arc, Mutex};
 
 use eframe::egui;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ActivePage {
+    Home,
+    Download,
+}
+
 const PAGE_MARGIN_X: f32 = 16.0;
 const PAGE_MARGIN_Y: f32 = 24.0;
 const CONTENT_MARGIN: f32 = 18.0;
@@ -10,10 +16,19 @@ const CONTROL_INSET: f32 = 10.0;
 const PANEL_MAX_WIDTH: f32 = 456.0;
 
 pub struct JayinsApp {
+    active_page: ActivePage,
     url_input: String,
+    profile_input: String,
     save_dir: String,
     logs: Arc<Mutex<Vec<String>>>,
+    caption: Arc<Mutex<String>>,
+    caption_copied_at: Option<std::time::Instant>,
+    profile_logs: Arc<Mutex<Vec<String>>>,
+    profile_posts: Arc<Mutex<Vec<crate::profile::ProfilePost>>>,
     downloading: Arc<Mutex<bool>>,
+    fetching_profile: Arc<Mutex<bool>>,
+    copied_post: Option<String>,
+    copied_post_at: Option<std::time::Instant>,
     runtime: tokio::runtime::Runtime,
 }
 
@@ -22,16 +37,31 @@ impl JayinsApp {
         configure_fonts(&cc.egui_ctx);
         configure_theme(&cc.egui_ctx);
         Self {
+            active_page: ActivePage::Home,
             url_input: String::new(),
+            profile_input: "https://www.instagram.com/jaychou/".to_string(),
             save_dir: default_save_dir(),
             logs: Arc::new(Mutex::new(vec!["就绪，粘贴链接开始下载".to_string()])),
+            caption: Arc::new(Mutex::new(String::new())),
+            caption_copied_at: None,
+            profile_logs: Arc::new(Mutex::new(vec!["输入主页链接，获取第一页帖子".to_string()])),
+            profile_posts: Arc::new(Mutex::new(Vec::new())),
             downloading: Arc::new(Mutex::new(false)),
+            fetching_profile: Arc::new(Mutex::new(false)),
+            copied_post: None,
+            copied_post_at: None,
             runtime: tokio::runtime::Runtime::new().expect("无法创建异步运行时"),
         }
     }
 
     fn add_log(&self, msg: &str) {
         if let Ok(mut logs) = self.logs.lock() {
+            logs.push(msg.to_string());
+        }
+    }
+
+    fn add_profile_log(&self, msg: &str) {
+        if let Ok(mut logs) = self.profile_logs.lock() {
             logs.push(msg.to_string());
         }
     }
@@ -57,8 +87,14 @@ impl JayinsApp {
         {
             *self.downloading.lock().unwrap() = true;
         }
+        // 清空上次文案
+        if let Ok(mut c) = self.caption.lock() {
+            c.clear();
+        }
+        self.caption_copied_at = None;
 
         let logs = self.logs.clone();
+        let caption_shared = self.caption.clone();
         let downloading = self.downloading.clone();
         self.runtime.spawn(async move {
             let log: crate::downloader::ProgressCallback = Box::new(move |msg: &str| {
@@ -67,9 +103,15 @@ impl JayinsApp {
                 }
             });
             let r = async {
-                let imgs = crate::downloader::fetch_image_urls(&url, "", "", &log).await?;
+                let (imgs, caption) = crate::downloader::fetch_image_urls(&url, "", "", &log).await?;
                 if imgs.is_empty() {
                     return Err(anyhow::anyhow!("未找到图片"));
+                }
+                // 保存文案
+                if !caption.is_empty() {
+                    if let Ok(mut c) = caption_shared.lock() {
+                        *c = caption;
+                    }
                 }
                 let d = crate::downloader::download_images(&imgs, &PathBuf::from(&save_dir), &log)
                     .await?;
@@ -91,6 +133,55 @@ impl JayinsApp {
         {
             self.save_dir = p.to_string_lossy().to_string();
         }
+    }
+
+    fn start_fetch_profile(&mut self) {
+        let profile_url = self.profile_input.trim().to_string();
+        if profile_url.is_empty() {
+            self.add_profile_log("⚠ 请输入主页链接");
+            return;
+        }
+        {
+            let fetching = self.fetching_profile.lock().unwrap();
+            if *fetching {
+                return;
+            }
+        }
+        {
+            *self.fetching_profile.lock().unwrap() = true;
+        }
+        if let Ok(mut posts) = self.profile_posts.lock() {
+            posts.clear();
+        }
+        self.copied_post = None;
+        self.copied_post_at = None;
+
+        let logs = self.profile_logs.clone();
+        let posts = self.profile_posts.clone();
+        let fetching = self.fetching_profile.clone();
+        self.runtime.spawn(async move {
+            if let Ok(mut logs) = logs.lock() {
+                logs.push(format!("正在获取主页: {}", profile_url));
+            }
+
+            match crate::profile::fetch_profile_posts(&profile_url).await {
+                Ok(found) => {
+                    let count = found.len();
+                    if let Ok(mut posts) = posts.lock() {
+                        *posts = found;
+                    }
+                    if let Ok(mut logs) = logs.lock() {
+                        logs.push(format!("✅ 找到 {} 个帖子", count));
+                    }
+                }
+                Err(e) => {
+                    if let Ok(mut logs) = logs.lock() {
+                        logs.push(format!("❌ {}", e));
+                    }
+                }
+            }
+            *fetching.lock().unwrap() = false;
+        });
     }
 }
 
@@ -174,7 +265,8 @@ impl eframe::App for JayinsApp {
         }
 
         let is_downloading = *self.downloading.lock().unwrap();
-        if is_downloading {
+        let is_fetching_profile = *self.fetching_profile.lock().unwrap();
+        if is_downloading || is_fetching_profile {
             ctx.request_repaint();
         }
 
@@ -182,12 +274,17 @@ impl eframe::App for JayinsApp {
             .frame(egui::Frame::none().fill(egui::Color32::from_rgb(246, 248, 252)))
             .show(ctx, |ui| {
                 paint_background(ui);
-                content_panel(ui, self, is_downloading);
+                content_panel(ui, self, is_downloading, is_fetching_profile);
             });
     }
 }
 
-fn content_panel(ui: &mut egui::Ui, app: &mut JayinsApp, is_downloading: bool) {
+fn content_panel(
+    ui: &mut egui::Ui,
+    app: &mut JayinsApp,
+    is_downloading: bool,
+    is_fetching_profile: bool,
+) {
     let available = ui
         .max_rect()
         .shrink2(egui::vec2(PAGE_MARGIN_X, PAGE_MARGIN_Y));
@@ -216,15 +313,30 @@ fn content_panel(ui: &mut egui::Ui, app: &mut JayinsApp, is_downloading: bool) {
         |ui| {
             let content_width = content_rect.width().floor();
             ui.set_width(content_width);
-            content_form(ui, app, is_downloading, content_width);
+            content_form(ui, app, is_downloading, is_fetching_profile, content_width);
         },
     );
 }
 
-fn content_form(ui: &mut egui::Ui, app: &mut JayinsApp, is_downloading: bool, content_width: f32) {
+fn content_form(
+    ui: &mut egui::Ui,
+    app: &mut JayinsApp,
+    is_downloading: bool,
+    is_fetching_profile: bool,
+    content_width: f32,
+) {
     header(ui, is_downloading);
-    ui.add_space(18.0);
+    ui.add_space(14.0);
+    nav_tabs(ui, app, content_width);
+    ui.add_space(14.0);
 
+    match app.active_page {
+        ActivePage::Home => home_page(ui, app, is_fetching_profile, content_width),
+        ActivePage::Download => download_page(ui, app, is_downloading, content_width),
+    }
+}
+
+fn download_page(ui: &mut egui::Ui, app: &mut JayinsApp, is_downloading: bool, content_width: f32) {
     field_label(ui, "帖子链接");
     let response = ui.add(
         egui::TextEdit::singleline(&mut app.url_input)
@@ -240,7 +352,7 @@ fn content_form(ui: &mut egui::Ui, app: &mut JayinsApp, is_downloading: bool, co
     field_label(ui, "保存位置");
     save_dir_row(ui, app, content_width);
 
-    ui.add_space(18.0);
+    ui.add_space(14.0);
     if gradient_button(
         ui,
         if is_downloading {
@@ -256,8 +368,272 @@ fn content_form(ui: &mut egui::Ui, app: &mut JayinsApp, is_downloading: bool, co
         app.start_download();
     }
 
-    ui.add_space(18.0);
-    log_panel(ui, &app.logs, content_width);
+    ui.add_space(10.0);
+
+    // 文案区域
+    let caption_text = app.caption.lock().map(|c| c.clone()).unwrap_or_default();
+    if !caption_text.is_empty() {
+        caption_panel(ui, &caption_text, &mut app.caption_copied_at, content_width);
+        ui.add_space(8.0);
+    }
+
+    // 日志
+    let log_height = if caption_text.is_empty() { 120.0 } else { 96.0 };
+    log_panel(ui, &app.logs, content_width, log_height);
+}
+
+fn home_page(ui: &mut egui::Ui, app: &mut JayinsApp, is_fetching: bool, content_width: f32) {
+    field_label(ui, "主页链接");
+    let response = ui.add(
+        egui::TextEdit::singleline(&mut app.profile_input)
+            .hint_text("https://www.instagram.com/jaychou/")
+            .desired_width(content_width)
+            .margin(egui::vec2(12.0, 11.0)),
+    );
+    if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+        app.start_fetch_profile();
+    }
+
+    ui.add_space(12.0);
+    if gradient_button(
+        ui,
+        if is_fetching {
+            "获取中..."
+        } else {
+            "获取第一页帖子"
+        },
+        is_fetching,
+        content_width,
+    )
+    .clicked()
+    {
+        app.start_fetch_profile();
+    }
+
+    ui.add_space(10.0);
+
+    // 帖子网格 + 日志 共享剩余空间
+    let remaining = ui.available_height();
+    let log_height = 96.0_f32.min(remaining * 0.35);
+    let grid_height = (remaining - log_height - 10.0).max(80.0);
+
+    posts_grid(ui, app, content_width, grid_height);
+    ui.add_space(8.0);
+    log_panel(ui, &app.profile_logs, content_width, log_height);
+}
+
+fn nav_tabs(ui: &mut egui::Ui, app: &mut JayinsApp, content_width: f32) {
+    let gap = 8.0;
+    let tab_width = (content_width - gap) / 2.0;
+    ui.horizontal(|ui| {
+        tab_button(
+            ui,
+            "主页抓取",
+            ActivePage::Home,
+            &mut app.active_page,
+            tab_width,
+        );
+        ui.add_space(gap - ui.spacing().item_spacing.x);
+        tab_button(
+            ui,
+            "图片下载",
+            ActivePage::Download,
+            &mut app.active_page,
+            tab_width,
+        );
+    });
+}
+
+fn tab_button(
+    ui: &mut egui::Ui,
+    label: &str,
+    page: ActivePage,
+    active_page: &mut ActivePage,
+    width: f32,
+) {
+    let active = *active_page == page;
+    let text_color = if active {
+        egui::Color32::WHITE
+    } else {
+        egui::Color32::from_rgb(86, 97, 118)
+    };
+    let fill = if active {
+        egui::Color32::from_rgb(236, 72, 153)
+    } else {
+        egui::Color32::from_rgb(241, 245, 249)
+    };
+    let button = egui::Button::new(egui::RichText::new(label).size(15.0).strong().color(text_color))
+        .min_size(egui::vec2(width, 36.0))
+        .fill(fill);
+    if ui
+        .add(button)
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
+    {
+        *active_page = page;
+    }
+}
+
+fn posts_grid(ui: &mut egui::Ui, app: &mut JayinsApp, content_width: f32, max_height: f32) {
+    let posts = app
+        .profile_posts
+        .lock()
+        .map(|posts| posts.clone())
+        .unwrap_or_default();
+
+    if posts.is_empty() {
+        empty_posts_box(ui, content_width);
+        return;
+    }
+
+    egui::ScrollArea::vertical()
+        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+        .max_height(max_height)
+        .show(ui, |ui| {
+            let gap = 10.0;
+            let card_width = ((content_width - gap) / 2.0).floor();
+            for chunk in posts.chunks(2) {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(content_width, card_width + 42.0),
+                    egui::Layout::left_to_right(egui::Align::Min),
+                    |ui| {
+                        for (i, post) in chunk.iter().enumerate() {
+                            if i > 0 {
+                                ui.add_space(gap);
+                            }
+                            post_card(ui, app, post, card_width);
+                        }
+                    },
+                );
+                ui.add_space(gap);
+            }
+        });
+}
+
+fn empty_posts_box(ui: &mut egui::Ui, width: f32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, 122.0), egui::Sense::hover());
+    ui.painter()
+        .rect_filled(rect, 14.0, egui::Color32::from_rgb(247, 249, 253));
+    ui.painter().rect_stroke(
+        rect,
+        14.0,
+        egui::Stroke::new(1.0, egui::Color32::from_rgb(233, 238, 246)),
+    );
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        "获取后显示帖子封面",
+        egui::FontId::proportional(15.0),
+        egui::Color32::from_rgb(108, 117, 134),
+    );
+}
+
+fn post_card(
+    ui: &mut egui::Ui,
+    app: &mut JayinsApp,
+    post: &crate::profile::ProfilePost,
+    width: f32,
+) {
+    let height = width + 42.0;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
+    let image_rect = egui::Rect::from_min_size(
+        rect.min + egui::vec2(6.0, 6.0),
+        egui::vec2(width - 12.0, width - 12.0),
+    );
+    let label_rect = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + 8.0, image_rect.bottom() + 4.0),
+        egui::pos2(rect.right() - 8.0, rect.bottom() - 4.0),
+    );
+
+    // 卡片背景
+    ui.painter()
+        .rect_filled(rect, 10.0, egui::Color32::from_rgb(247, 249, 253));
+    ui.painter().rect_stroke(
+        rect,
+        10.0,
+        egui::Stroke::new(1.0, egui::Color32::from_rgb(233, 238, 246)),
+    );
+
+    // 封面图
+    if !post.cover_bytes.is_empty() {
+        if let Some(tex) = load_texture(ui.ctx(), &post.cover_url, &post.cover_bytes) {
+            ui.painter().image(
+                tex.id(),
+                image_rect,
+                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                egui::Color32::WHITE,
+            );
+        }
+    } else {
+        ui.painter()
+            .rect_filled(image_rect, 8.0, egui::Color32::from_rgb(240, 243, 248));
+        ui.painter().text(
+            image_rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "📷",
+            egui::FontId::proportional(20.0),
+            egui::Color32::from_rgb(160, 170, 185),
+        );
+    }
+
+    // 帖子 shortcode 标签 + 复制状态
+    let short = post
+        .url
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or("post");
+
+    // 自动重置复制状态（1.5 秒后）
+    let copied = if app.copied_post.as_deref() == Some(post.url.as_str()) {
+        if let Some(t) = app.copied_post_at {
+            if t.elapsed().as_millis() > 1500 {
+                app.copied_post = None;
+                app.copied_post_at = None;
+                false
+            } else {
+                true
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    if copied {
+        ui.ctx().request_repaint();
+    }
+
+    let (label_text, label_color) = if copied {
+        (
+            format!("已复制 {}", short),
+            egui::Color32::from_rgb(22, 163, 74),
+        )
+    } else {
+        (
+            short.to_string(),
+            egui::Color32::from_rgb(86, 97, 118),
+        )
+    };
+    ui.painter().text(
+        label_rect.left_center(),
+        egui::Align2::LEFT_CENTER,
+        &label_text,
+        egui::FontId::proportional(13.0),
+        label_color,
+    );
+
+    if response
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text("点击复制帖子链接")
+        .clicked()
+    {
+        ui.ctx().copy_text(post.url.clone());
+        app.copied_post = Some(post.url.clone());
+        app.copied_post_at = Some(std::time::Instant::now());
+        app.add_profile_log("已复制帖子链接");
+    }
 }
 
 fn save_dir_row(ui: &mut egui::Ui, app: &mut JayinsApp, row_width: f32) {
@@ -339,13 +715,13 @@ fn header(ui: &mut egui::Ui, is_downloading: bool) {
         ui.vertical(|ui| {
             ui.label(
                 egui::RichText::new("Jayins")
-                    .size(27.0)
+                    .size(30.0)
                     .strong()
                     .color(egui::Color32::from_rgb(17, 24, 39)),
             );
             ui.label(
                 egui::RichText::new("Instagram 图片下载")
-                    .size(13.0)
+                    .size(15.0)
                     .color(egui::Color32::from_rgb(108, 117, 134)),
             );
         });
@@ -393,14 +769,14 @@ fn status_badge(ui: &mut egui::Ui, is_downloading: bool) {
         .rounding(egui::Rounding::same(999.0))
         .inner_margin(egui::Margin::symmetric(11.0, 6.0))
         .show(ui, |ui| {
-            ui.label(egui::RichText::new(text).size(12.0).strong().color(color));
+            ui.label(egui::RichText::new(text).size(13.0).strong().color(color));
         });
 }
 
 fn field_label(ui: &mut egui::Ui, label: &str) {
     ui.label(
         egui::RichText::new(label)
-            .size(12.0)
+            .size(14.0)
             .strong()
             .color(egui::Color32::from_rgb(98, 108, 128)),
     );
@@ -442,7 +818,7 @@ fn gradient_button(ui: &mut egui::Ui, text: &str, disabled: bool, width: f32) ->
         rect.center(),
         egui::Align2::CENTER_CENTER,
         text,
-        egui::FontId::proportional(16.0),
+        egui::FontId::proportional(18.0),
         egui::Color32::WHITE,
     );
 
@@ -453,29 +829,109 @@ fn gradient_button(ui: &mut egui::Ui, text: &str, disabled: bool, width: f32) ->
     }
 }
 
-fn log_panel(ui: &mut egui::Ui, logs: &Arc<Mutex<Vec<String>>>, width: f32) {
+fn caption_panel(ui: &mut egui::Ui, text: &str, copied_at: &mut Option<std::time::Instant>, width: f32) {
     let width = width.max(260.0);
-    let height = 144.0;
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
-    let inner = rect.shrink(14.0);
 
+    // 自动重置复制状态（1.5 秒后）
+    let is_copied = if let Some(t) = copied_at {
+        if t.elapsed().as_millis() > 1500 {
+            *copied_at = None;
+            false
+        } else {
+            true
+        }
+    } else {
+        false
+    };
+
+    if is_copied {
+        ui.ctx().request_repaint();
+    }
+
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(width, 80.0),
+        egui::Sense::click(),
+    );
+
+    let bg = if is_copied {
+        egui::Color32::from_rgb(232, 248, 239)
+    } else {
+        egui::Color32::from_rgb(247, 249, 253)
+    };
     ui.painter()
-        .rect_filled(rect, 14.0, egui::Color32::from_rgb(247, 249, 253));
+        .rect_filled(rect, 14.0, bg);
     ui.painter().rect_stroke(
         rect,
         14.0,
         egui::Stroke::new(1.0, egui::Color32::from_rgb(233, 238, 246)),
     );
 
+    let inner = rect.shrink(12.0);
     ui.allocate_new_ui(
         egui::UiBuilder::new()
             .max_rect(inner)
             .layout(egui::Layout::top_down(egui::Align::Min)),
         |ui| {
+            ui.set_width(inner.width());
+            ui.add(
+                egui::Label::new(
+                    egui::RichText::new("帖子文案")
+                        .size(14.0)
+                        .strong()
+                        .color(egui::Color32::from_rgb(98, 108, 128)),
+                )
+                .sense(egui::Sense::hover()),
+            );
+            ui.add_space(4.0);
+            if is_copied {
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new("✅ 已复制")
+                            .size(14.0)
+                            .color(egui::Color32::from_rgb(22, 163, 74)),
+                    )
+                    .sense(egui::Sense::hover()),
+                );
+            } else {
+                let display = if text.chars().count() > 100 {
+                    let truncated: String = text.chars().take(100).collect();
+                    format!("{}…（点击复制全文）", truncated)
+                } else {
+                    text.to_string()
+                };
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(&display)
+                            .size(14.0)
+                            .color(egui::Color32::from_rgb(48, 58, 78)),
+                    )
+                    .sense(egui::Sense::hover()),
+                );
+            }
+        },
+    );
+
+    if response.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+        ui.ctx().copy_text(text.to_string());
+        *copied_at = Some(std::time::Instant::now());
+    }
+}
+
+fn log_panel(ui: &mut egui::Ui, logs: &Arc<Mutex<Vec<String>>>, width: f32, height: f32) {
+    let width = width.max(260.0);
+
+    egui::Frame::none()
+        .fill(egui::Color32::from_rgb(247, 249, 253))
+        .rounding(egui::Rounding::same(14.0))
+        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(233, 238, 246)))
+        .inner_margin(egui::Margin::same(14.0))
+        .show(ui, |ui| {
+            ui.set_width(width - 28.0);
+
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new("日志")
-                        .size(13.0)
+                        .size(14.0)
                         .strong()
                         .color(egui::Color32::from_rgb(48, 58, 78)),
                 );
@@ -483,25 +939,31 @@ fn log_panel(ui: &mut egui::Ui, logs: &Arc<Mutex<Vec<String>>>, width: f32) {
                     let count = logs.lock().map(|l| l.len()).unwrap_or_default();
                     ui.label(
                         egui::RichText::new(format!("{} 条", count))
-                            .size(12.0)
+                            .size(13.0)
                             .color(egui::Color32::from_rgb(124, 134, 152)),
                     );
                 });
             });
-            ui.add_space(8.0);
+
+            ui.add_space(6.0);
+
+            let scroll_h = (height - 56.0).max(20.0);
+            let label_w = width - 42.0;
             egui::ScrollArea::vertical()
                 .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
-                .max_height(84.0)
+                .max_height(scroll_h)
                 .stick_to_bottom(true)
                 .show(ui, |ui| {
+                    ui.set_width(label_w);
                     if let Ok(logs) = logs.lock() {
                         for log in logs.iter() {
-                            ui.label(egui::RichText::new(log).size(12.5).color(log_color(log)));
+                            ui.label(
+                                egui::RichText::new(log).size(13.0).color(log_color(log)),
+                            );
                         }
                     }
                 });
-        },
-    );
+        });
 }
 
 fn log_color(log: &str) -> egui::Color32 {
@@ -551,6 +1013,15 @@ fn lerp_color(from: egui::Color32, to: egui::Color32, t: f32) -> egui::Color32 {
     let g = egui::lerp(from.g() as f32..=to.g() as f32, t).round() as u8;
     let b = egui::lerp(from.b() as f32..=to.b() as f32, t).round() as u8;
     egui::Color32::from_rgb(r, g, b)
+}
+
+fn load_texture(ctx: &egui::Context, key: &str, bytes: &[u8]) -> Option<egui::TextureHandle> {
+    let img = image::load_from_memory(bytes).ok()?;
+    let rgba = img.to_rgba8();
+    let size = [rgba.width() as usize, rgba.height() as usize];
+    let pixels = rgba.into_raw();
+    let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &pixels);
+    Some(ctx.load_texture(key, color_image, egui::TextureOptions::LINEAR))
 }
 
 fn default_save_dir() -> String {
