@@ -300,13 +300,13 @@ fn extract_visible_images(tab: &headless_chrome::Tab) -> Vec<String> {
         (function() {
             // 优先从 ul li（轮播）提取
             var imgs = document.querySelectorAll('ul li ._aagu img');
-            // 如果没有，从 article 内提取（单图帖）
+            // 单图帖：用 ._aa20 精确匹配（帖子图片独有）
+            if (imgs.length === 0) {
+                imgs = document.querySelectorAll('._aagu._aa20 img');
+            }
+            // 还没有，从 article 内提取
             if (imgs.length === 0) {
                 imgs = document.querySelectorAll('article ._aagu img');
-            }
-            // 还没有，从整个页面的 ._aagu 提取
-            if (imgs.length === 0) {
-                imgs = document.querySelectorAll('._aagu img');
             }
             var urls = [];
             var seen = {};
