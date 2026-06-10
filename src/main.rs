@@ -8,34 +8,55 @@ use app::JayinsApp;
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().collect();
 
-    // 命令行模式
-    if args.len() >= 2 {
-        match args[1].as_str() {
-            "--help" | "-h" => {
-                print_help();
-                return Ok(());
-            }
-            "profile" => {
-                if args.len() < 3 {
-                    eprintln!("❌ 请提供主页链接");
-                    eprintln!("用法: jayins profile <主页链接>");
-                    std::process::exit(1);
-                }
-                return run_profile_cli(&args[2]);
-            }
-            _ => {
-                let url = &args[1];
-                let save_dir = if args.len() >= 3 {
-                    args[2].clone()
-                } else {
-                    default_save_dir()
-                };
-                return run_download_cli(url, &save_dir);
+    // 提取选项参数
+    let cookie_arg = extract_arg(&args, "--cookie")
+        .or_else(|| extract_arg(&args, "-c"));
+
+    // 收集非选项参数（跳过 -c value 等）
+    let mut positional: Vec<&str> = Vec::new();
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == "-c" || args[i] == "--cookie" {
+            i += 2; // 跳过 key 和 value
+            continue;
+        }
+        if !args[i].starts_with('-') {
+            positional.push(&args[i]);
+        }
+        i += 1;
+    }
+
+    // 判断是否有命令行参数
+    if positional.is_empty() && !args.contains(&"--help".to_string()) && !args.contains(&"-h".to_string()) {
+        // 启动 GUI
+        return run_gui();
+    }
+
+    // 帮助
+    if args.contains(&"--help".to_string()) || args.contains(&"-h".to_string()) {
+        print_help();
+        return Ok(());
+    }
+
+    // profile 子命令
+    if positional.first() == Some(&"profile") {
+        match positional.get(1) {
+            Some(url) => return run_profile_cli(url, cookie_arg.as_deref()),
+            None => {
+                eprintln!("❌ 请提供主页链接");
+                eprintln!("用法: jayins profile <主页链接>");
+                std::process::exit(1);
             }
         }
     }
 
-    // GUI 模式
+    // 下载模式
+    let url = positional[0];
+    let save_dir = positional.get(1).cloned().map(String::from).unwrap_or_else(default_save_dir);
+    return run_download_cli(url, &save_dir, cookie_arg.as_deref());
+}
+
+fn run_gui() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([468.0, 765.0])
@@ -52,41 +73,58 @@ fn main() -> eframe::Result {
     )
 }
 
+/// 从参数列表中提取 --key value 形式的参数
+fn extract_arg(args: &[String], key: &str) -> Option<String> {
+    for i in 0..args.len() {
+        if args[i] == key && i + 1 < args.len() {
+            return Some(args[i + 1].clone());
+        }
+    }
+    None
+}
+
 fn print_help() {
     println!("Jayins - Instagram 图片下载器");
     println!();
     println!("用法:");
-    println!("  jayins                              启动图形界面");
-    println!("  jayins <帖子链接> [保存目录]          下载帖子图片");
-    println!("  jayins profile <主页链接>             获取主页帖子列表");
+    println!("  jayins [选项] [链接] [保存目录]       启动 GUI 或命令行下载");
+    println!("  jayins profile [选项] <主页链接>       获取主页帖子列表");
+    println!();
+    println!("选项:");
+    println!("  -c, --cookie <COOKIE>    指定 Instagram Cookie");
+    println!("  -h, --help               显示帮助信息");
     println!();
     println!("示例:");
     println!("  jayins https://www.instagram.com/p/ABC123/");
     println!("  jayins https://www.instagram.com/p/ABC123/ ~/Pictures");
+    println!("  jayins -c 'sessionid=xxx; ds_user_id=xxx' https://www.instagram.com/p/ABC123/");
     println!("  jayins profile https://www.instagram.com/jaychou/");
+    println!("  jayins profile -c 'sessionid=xxx' https://www.instagram.com/jaychou/");
     println!();
     println!("Cookie 设置（按优先级）:");
-    println!("  1. 环境变量: export INSTAGRAM_COOKIE='sessionid=xxx; ...'");
-    println!("  2. 配置文件: ~/.config/jayins/cookie.txt");
-    println!("  3. 自动读取: 从 Chrome 浏览器自动获取（需要 browser_cookie3）");
-    println!("  4. 内置默认: 使用程序内置的 Cookie");
+    println!("  1. 命令行参数:  -c 'sessionid=xxx; ...'");
+    println!("  2. 环境变量:    export INSTAGRAM_COOKIE='sessionid=xxx; ...'");
+    println!("  3. 配置文件:    ~/.config/jayins/cookie.txt");
+    println!("  4. 自动读取:    从 Chrome 浏览器自动获取");
+    println!("  5. 内置默认:    使用程序内置的 Cookie");
     println!();
     println!("Linux 用户获取 Cookie:");
     println!("  1. 浏览器登录 Instagram");
     println!("  2. F12 → Console → 输入 document.cookie");
-    println!("  3. 复制输出到 ~/.config/jayins/cookie.txt");
+    println!("  3. 复制输出使用 -c 参数或保存到 ~/.config/jayins/cookie.txt");
 }
 
-fn run_download_cli(url: &str, save_dir: &str) -> eframe::Result {
+fn run_download_cli(url: &str, save_dir: &str, cookie: Option<&str>) -> eframe::Result {
     println!("链接: {}", url);
     println!("保存到: {}", save_dir);
 
     let rt = tokio::runtime::Runtime::new().expect("无法创建异步运行时");
     let log: downloader::ProgressCallback = Box::new(|msg: &str| println!("{}", msg));
 
+    let cookie_str = cookie.unwrap_or("");
     match rt.block_on(async {
         let (images, caption) =
-            downloader::fetch_image_urls(url, "", "", &log).await?;
+            downloader::fetch_image_urls(url, cookie_str, "", &log).await?;
 
         if !caption.is_empty() {
             println!("--- 文案 ---");
@@ -116,9 +154,14 @@ fn run_download_cli(url: &str, save_dir: &str) -> eframe::Result {
     Ok(())
 }
 
-fn run_profile_cli(profile_url: &str) -> eframe::Result {
+fn run_profile_cli(profile_url: &str, cookie: Option<&str>) -> eframe::Result {
     println!("主页: {}", profile_url);
     println!("正在获取帖子列表...");
+
+    // 设置 Cookie 环境变量（如果通过命令行传入）
+    if let Some(c) = cookie {
+        std::env::set_var("INSTAGRAM_COOKIE", c);
+    }
 
     let rt = tokio::runtime::Runtime::new().expect("无法创建异步运行时");
 
