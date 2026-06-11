@@ -18,16 +18,21 @@ pub async fn keepalive() -> Result<()> {
     let cookie = try_load_chrome_cookie()
         .unwrap_or_else(|| DEFAULT_COOKIE.to_string());
 
+    eprintln!("[INFO] Cookie: {}...", &cookie[..cookie.len().min(30)]);
+
     // 使用系统默认配置创建客户端
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
+        .build()
+        .map_err(|e| anyhow::anyhow!("创建 HTTP 客户端失败: {}", e))?;
 
     // 访问 Instagram 主页来续期 Cookie
     let resp = client
         .get("https://www.instagram.com/")
-        .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
         .header("Cookie", &cookie)
         .send()
-        .await?;
+        .await
+        .map_err(|e| anyhow::anyhow!("请求失败: {}", e))?;
 
     let status = resp.status();
     eprintln!("[INFO] Instagram 响应: {}", status);
