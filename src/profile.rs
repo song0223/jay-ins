@@ -198,7 +198,7 @@ fn fetch_with_browser(profile_url: &str, download_covers: bool) -> Result<Vec<Pr
     Ok(posts)
 }
 
-/// 通过 Instagram GraphQL API 获取主页帖子（更可靠）
+/// 通过 Instagram GraphQL API 获取主页帖子（使用 curl）
 fn fetch_via_api(profile_url: &str, cookie: &str) -> Result<Vec<ProfilePost>> {
     let username = crate::utils::normalize_profile_url(profile_url)
         .and_then(|u| {
@@ -208,23 +208,23 @@ fn fetch_via_api(profile_url: &str, cookie: &str) -> Result<Vec<ProfilePost>> {
 
     eprintln!("[INFO] 用户名: {}", username);
 
-    let client = reqwest::blocking::Client::builder()
-        .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
-        .build()?;
+    // 使用 curl 获取用户信息
+    let api_url = format!("https://www.instagram.com/api/v1/users/web_profile_info/?username={}", username);
+    let output = std::process::Command::new("curl")
+        .args([
+            "-s",
+            "-H", "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+            "-H", "X-IG-App-ID: 936619743392459",
+            "-H", "X-Requested-With: XMLHttpRequest",
+            "-H", &format!("Cookie: {}", cookie),
+            &api_url,
+        ])
+        .output()
+        .map_err(|e| anyhow::anyhow!("执行 curl 失败: {}", e))?;
 
-    // 获取用户 ID（通过 web_profile_info）
-    let resp = client
-        .get(&format!("https://www.instagram.com/api/v1/users/web_profile_info/?username={}", username))
-        .header("X-IG-App-ID", "936619743392459")
-        .header("X-Requested-With", "XMLHttpRequest")
-        .header("Cookie", cookie)
-        .send()?;
-
-    if !resp.status().is_success() {
-        bail!("用户信息请求失败: {}", resp.status());
-    }
-
-    let data: serde_json::Value = resp.json()?;
+    let response = String::from_utf8_lossy(&output.stdout);
+    let data: serde_json::Value = serde_json::from_str(&response)
+        .map_err(|e| anyhow::anyhow!("解析 JSON 失败: {}", e))?;
 
     // 从 GraphQL 数据中提取帖子
     let user_data = data.pointer("/data/user")
