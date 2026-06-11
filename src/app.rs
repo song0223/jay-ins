@@ -29,6 +29,7 @@ pub struct JayinsApp {
     fetching_profile: Arc<Mutex<bool>>,
     copied_post: Option<String>,
     copied_post_at: Option<std::time::Instant>,
+    texture_cache: std::collections::HashMap<String, egui::TextureHandle>,
     runtime: tokio::runtime::Runtime,
 }
 
@@ -50,6 +51,7 @@ impl JayinsApp {
             fetching_profile: Arc::new(Mutex::new(false)),
             copied_post: None,
             copied_post_at: None,
+            texture_cache: std::collections::HashMap::new(),
             runtime: tokio::runtime::Runtime::new().expect("无法创建异步运行时"),
         }
     }
@@ -554,9 +556,20 @@ fn post_card(
         egui::Stroke::new(1.0, egui::Color32::from_rgb(233, 238, 246)),
     );
 
-    // 封面图
+    // 封面图（带缓存）
     if !post.cover_bytes.is_empty() {
-        if let Some(tex) = load_texture(ui.ctx(), &post.cover_url, &post.cover_bytes) {
+        let cache_key = &post.cover_url;
+        let tex = if let Some(cached) = app.texture_cache.get(cache_key) {
+            Some(cached.clone())
+        } else {
+            let loaded = load_texture(ui.ctx(), cache_key, &post.cover_bytes);
+            if let Some(ref t) = loaded {
+                app.texture_cache.insert(cache_key.clone(), t.clone());
+            }
+            loaded
+        };
+
+        if let Some(tex) = tex {
             ui.painter().image(
                 tex.id(),
                 image_rect,
