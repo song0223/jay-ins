@@ -36,8 +36,8 @@ pub async fn keepalive() -> Result<()> {
     let status_code = String::from_utf8_lossy(&output.stdout).trim().to_string();
     eprintln!("[INFO] Instagram 响应: {}", status_code);
 
-    if status_code == "200" {
-        eprintln!("[INFO] Cookie 有效，会话已续期");
+    if status_code == "200" || status_code == "302" {
+        eprintln!("[INFO] Cookie 续期成功 (HTTP {})", status_code);
         Ok(())
     } else {
         bail!("请求失败: HTTP {}", status_code)
