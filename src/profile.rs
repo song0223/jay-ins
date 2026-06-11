@@ -21,10 +21,7 @@ pub async fn keepalive() -> Result<()> {
     eprintln!("[INFO] Cookie: {}...", &cookie[..cookie.len().min(30)]);
 
     // 使用系统默认配置创建客户端
-    let client = reqwest::Client::builder()
-        .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
-        .build()
-        .map_err(|e| anyhow::anyhow!("创建 HTTP 客户端失败: {}", e))?;
+    let client = reqwest::Client::new();
 
     // 访问 Instagram 主页来续期 Cookie
     let resp = client
