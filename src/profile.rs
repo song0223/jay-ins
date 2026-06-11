@@ -20,31 +20,27 @@ pub async fn keepalive() -> Result<()> {
 
     eprintln!("[INFO] Cookie: {}...", &cookie[..cookie.len().min(30)]);
 
-    // 使用系统默认配置创建客户端
-    let client = reqwest::Client::new();
+    // 使用 curl 发送请求（兼容性更好）
+    let output = std::process::Command::new("curl")
+        .args([
+            "-s",
+            "-o", "/dev/null",
+            "-w", "%{http_code}",
+            "-H", &format!("Cookie: {}", cookie),
+            "-H", "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+            "https://www.instagram.com/",
+        ])
+        .output()
+        .map_err(|e| anyhow::anyhow!("执行 curl 失败: {}", e))?;
 
-    // 访问 Instagram 主页来续期 Cookie
-    let resp = client
-        .get("https://www.instagram.com/")
-        .header("Cookie", &cookie)
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("请求失败: {}", e))?;
+    let status_code = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    eprintln!("[INFO] Instagram 响应: {}", status_code);
 
-    let status = resp.status();
-    eprintln!("[INFO] Instagram 响应: {}", status);
-
-    if status.is_success() {
-        // 检查是否登录状态
-        let text = resp.text().await?;
-        if text.contains("sessionid") || !text.contains("/accounts/login") {
-            eprintln!("[INFO] Cookie 有效，会话已续期");
-            Ok(())
-        } else {
-            bail!("Cookie 已过期，请重新获取")
-        }
+    if status_code == "200" {
+        eprintln!("[INFO] Cookie 有效，会话已续期");
+        Ok(())
     } else {
-        bail!("请求失败: {}", status)
+        bail!("请求失败: HTTP {}", status_code)
     }
 }
 
