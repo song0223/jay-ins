@@ -13,6 +13,39 @@ pub struct ProfilePost {
 const DEFAULT_COOKIE: &str =
     "ds_user_id=6009511404; csrftoken=en2hyrbjkI3AjRBUKDUPcaLyNsGYhocx; wd=1671x626; sessionid=6009511404%3ADt7ylCb1z380Fq%3A6%3AAYi90RxHDVdEZ36B89y1V91Gt64gvDDZ02i1Q7NZBjg";
 
+/// 续期 Cookie（访问 Instagram 保持会话活跃）
+pub async fn keepalive() -> Result<()> {
+    let cookie = try_load_chrome_cookie()
+        .unwrap_or_else(|| DEFAULT_COOKIE.to_string());
+
+    let client = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
+        .build()?;
+
+    // 访问 Instagram 主页来续期 Cookie
+    let resp = client
+        .get("https://www.instagram.com/")
+        .header("Cookie", &cookie)
+        .send()
+        .await?;
+
+    let status = resp.status();
+    eprintln!("[INFO] Instagram 响应: {}", status);
+
+    if status.is_success() {
+        // 检查是否登录状态
+        let text = resp.text().await?;
+        if text.contains("sessionid") || !text.contains("/accounts/login") {
+            eprintln!("[INFO] Cookie 有效，会话已续期");
+            Ok(())
+        } else {
+            bail!("Cookie 已过期，请重新获取")
+        }
+    } else {
+        bail!("请求失败: {}", status)
+    }
+}
+
 /// 尝试从 Chrome 读取最新的 Instagram Cookie
 pub fn try_load_chrome_cookie() -> Option<String> {
     // 方式1: 从环境变量读取

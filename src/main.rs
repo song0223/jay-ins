@@ -50,6 +50,11 @@ fn main() -> eframe::Result {
         }
     }
 
+    // keepalive 子命令
+    if positional.first() == Some(&"keepalive") {
+        return run_keepalive_cli(cookie_arg.as_deref());
+    }
+
     // 下载模式
     let url = positional[0];
     let save_dir = positional.get(1).cloned().map(String::from).unwrap_or_else(default_save_dir);
@@ -89,6 +94,7 @@ fn print_help() {
     println!("用法:");
     println!("  jayins [选项] [链接] [保存目录]       启动 GUI 或命令行下载");
     println!("  jayins profile [选项] <主页链接>       获取主页帖子列表");
+    println!("  jayins keepalive [选项]               续期 Cookie（保持登录状态）");
     println!();
     println!("选项:");
     println!("  -c, --cookie <COOKIE>    指定 Instagram Cookie");
@@ -97,9 +103,8 @@ fn print_help() {
     println!("示例:");
     println!("  jayins https://www.instagram.com/p/ABC123/");
     println!("  jayins https://www.instagram.com/p/ABC123/ ~/Pictures");
-    println!("  jayins -c 'sessionid=xxx; ds_user_id=xxx' https://www.instagram.com/p/ABC123/");
     println!("  jayins profile https://www.instagram.com/jaychou/");
-    println!("  jayins profile -c 'sessionid=xxx' https://www.instagram.com/jaychou/");
+    println!("  jayins keepalive");
     println!();
     println!("Cookie 设置（按优先级）:");
     println!("  1. 命令行参数:  -c 'sessionid=xxx; ...'");
@@ -108,10 +113,9 @@ fn print_help() {
     println!("  4. 自动读取:    从 Chrome 浏览器自动获取");
     println!("  5. 内置默认:    使用程序内置的 Cookie");
     println!();
-    println!("Linux 用户获取 Cookie:");
-    println!("  1. 浏览器登录 Instagram");
-    println!("  2. F12 → Console → 输入 document.cookie");
-    println!("  3. 复制输出使用 -c 参数或保存到 ~/.config/jayins/cookie.txt");
+    println!("服务器定时续期 Cookie:");
+    println!("  # 每天凌晨 2 点续期");
+    println!("  0 2 * * * INSTAGRAM_COOKIE='sessionid=xxx' /usr/local/bin/jayins keepalive >> /var/log/jayins.log 2>&1");
 }
 
 fn run_download_cli(url: &str, save_dir: &str, cookie: Option<&str>) -> eframe::Result {
@@ -185,6 +189,29 @@ fn run_profile_cli(profile_url: &str, cookie: Option<&str>) -> eframe::Result {
         }
         Err(e) => {
             eprintln!("❌ {}", e);
+            std::process::exit(1);
+        }
+    }
+
+    Ok(())
+}
+
+fn run_keepalive_cli(cookie: Option<&str>) -> eframe::Result {
+    // 设置 Cookie 环境变量（如果通过命令行传入）
+    if let Some(c) = cookie {
+        std::env::set_var("INSTAGRAM_COOKIE", c);
+    }
+
+    let rt = tokio::runtime::Runtime::new().expect("无法创建异步运行时");
+
+    eprintln!("[INFO] 正在续期 Cookie...");
+
+    match rt.block_on(profile::keepalive()) {
+        Ok(_) => {
+            eprintln!("✅ Cookie 续期成功");
+        }
+        Err(e) => {
+            eprintln!("❌ Cookie 续期失败: {}", e);
             std::process::exit(1);
         }
     }
