@@ -198,7 +198,7 @@ fn fetch_with_browser(profile_url: &str, download_covers: bool) -> Result<Vec<Pr
     Ok(posts)
 }
 
-/// 通过 Instagram GraphQL API 获取主页帖子（使用 curl）
+/// 通过 Instagram API 获取主页帖子（使用移动端 API）
 fn fetch_via_api(profile_url: &str, cookie: &str) -> Result<Vec<ProfilePost>> {
     let username = crate::utils::normalize_profile_url(profile_url)
         .and_then(|u| {
@@ -208,14 +208,13 @@ fn fetch_via_api(profile_url: &str, cookie: &str) -> Result<Vec<ProfilePost>> {
 
     eprintln!("[INFO] 用户名: {}", username);
 
-    // 使用 curl 获取用户信息
+    // 先获取用户 ID
     let api_url = format!("https://www.instagram.com/api/v1/users/web_profile_info/?username={}", username);
     let output = std::process::Command::new("curl")
         .args([
             "-s",
             "-H", "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
             "-H", "X-IG-App-ID: 936619743392459",
-            "-H", "X-Requested-With: XMLHttpRequest",
             "-H", &format!("Cookie: {}", cookie),
             &api_url,
         ])
@@ -226,37 +225,55 @@ fn fetch_via_api(profile_url: &str, cookie: &str) -> Result<Vec<ProfilePost>> {
     let data: serde_json::Value = serde_json::from_str(&response)
         .map_err(|e| anyhow::anyhow!("解析 JSON 失败: {}", e))?;
 
-    // 从 GraphQL 数据中提取帖子
-    let user_data = data.pointer("/data/user")
-        .context("无法获取用户数据")?;
+    let user_id = data.pointer("/data/user/id")
+        .and_then(|v| v.as_str())
+        .context("无法获取用户 ID")?;
 
-    let edges = user_data
-        .pointer("/edge_owner_to_timeline_media/edges")
+    eprintln!("[INFO] 用户 ID: {}", user_id);
+
+    // 使用移动端 API 获取帖子
+    let feed_url = format!("https://www.instagram.com/api/v1/feed/user/{}/?count=12", user_id);
+    let output = std::process::Command::new("curl")
+        .args([
+            "-s",
+            "-H", "User-Agent: Instagram 275.0.0.27.98 Android (33/13; 420dpi; 1080x2400; samsung; SM-G991B; o1s; exynos2100; en_US; 458229258)",
+            "-H", "X-IG-App-ID: 936619743392459",
+            "-H", &format!("Cookie: {}", cookie),
+            &feed_url,
+        ])
+        .output()
+        .map_err(|e| anyhow::anyhow!("执行 curl 失败: {}", e))?;
+
+    let response = String::from_utf8_lossy(&output.stdout);
+    let data: serde_json::Value = serde_json::from_str(&response)
+        .map_err(|e| anyhow::anyhow!("解析 JSON 失败: {}", e))?;
+
+    let items = data.get("items")
         .and_then(|v| v.as_array())
         .context("无法获取帖子列表")?;
 
     let mut posts = Vec::new();
-    for edge in edges {
-        let node = edge.get("node").unwrap_or(edge);
-        let shortcode = node.get("shortcode")
+    for item in items {
+        let code = item.get("code")
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        let is_video = node.get("is_video")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let display_url = node.get("display_url")
+        let media_type = item.get("media_type")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(1);
+        let cover_url = item.pointer("/image_versions2/candidates/0/url")
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
+        let is_video = media_type == 2;
         let url = if is_video {
-            format!("https://www.instagram.com/reel/{}/", shortcode)
+            format!("https://www.instagram.com/reel/{}/", code)
         } else {
-            format!("https://www.instagram.com/p/{}/", shortcode)
+            format!("https://www.instagram.com/p/{}/", code)
         };
 
         posts.push(ProfilePost {
             url,
-            cover_url: display_url.to_string(),
+            cover_url: cover_url.to_string(),
             timestamp: String::new(),
             cover_bytes: Vec::new(),
         });
