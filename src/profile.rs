@@ -18,13 +18,13 @@ pub async fn keepalive() -> Result<()> {
     let cookie = try_load_chrome_cookie()
         .unwrap_or_else(|| DEFAULT_COOKIE.to_string());
 
-    let client = reqwest::Client::builder()
-        .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
-        .build()?;
+    // 使用系统默认配置创建客户端
+    let client = reqwest::Client::new();
 
     // 访问 Instagram 主页来续期 Cookie
     let resp = client
         .get("https://www.instagram.com/")
+        .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
         .header("Cookie", &cookie)
         .send()
         .await?;
